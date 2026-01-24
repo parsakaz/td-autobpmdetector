@@ -10,9 +10,10 @@ Automatic BPM detection and synchronization for TouchDesigner, powered by a Temp
 
 1. Open the project and enter the `AutoBpm` container.
 2. Locate the `tdPyEnvManager` palette component.
-3. In its parameters, create a new Python environment:
+3. In the parameters panel, create a new Python environment:
    - Mode: Python vEnv
    - Source: `requirements.txt`
+4. If some modules aren't found in `script1_callbacks`, you might have to pulse the Restart parameter in `tdPyEnvManager`
 
 ## Usage
 
