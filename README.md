@@ -14,6 +14,7 @@ Automatic BPM detection and synchronization for TouchDesigner, powered by a Temp
    - Mode: Python vEnv
    - Source: `requirements.txt`
 4. If some modules aren't found in `script1_callbacks`, you might have to pulse the Restart parameter in `tdPyEnvManager`
+5. In the `script1` parameters panel, on the `BPM Detection Params` page, set Torch Device to be either `mps`, `cpu`, or `cuda`
 
 ## Usage
 
