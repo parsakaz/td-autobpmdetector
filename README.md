@@ -2,9 +2,7 @@
 
 Automatic BPM detection and synchronization for TouchDesigner, powered by a Temporal Convolutional Network trained on 7,000+ tracks spanning jazz, techno, footwork, and more.
 
-<p align="center">
-<img src="demo/autobpmsync_screenshot.png" width=500 />
-</p>
+https://github.com/user-attachments/assets/052f8e34-de89-459e-891b-1c51ffe6ac2e
 
 ## Setup
 
