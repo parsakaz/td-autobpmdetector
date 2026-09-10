@@ -33,12 +33,6 @@ p = "/full/path/to/td-autobpmdetector/touchdesigner/build_component.py"
 exec(open(p).read(), {"__file__": p})
 ```
 
-`run()` will not work here — it takes a string of Python *code*, not a file path. And
-passing `__file__` matters: TouchDesigner's textport namespace already defines one,
-pointing inside the application bundle, so a bare `exec(open(p).read())` would go looking
-for the component files in `TouchDesigner.app`. Setting `TDAUTOBPM_REPO` to the repository
-root works too.
-
 That builds `/AutoBpm` and writes `touchdesigner/AutoBpm.tox`. Wire an **Audio Device In**
 CHOP into its `audio_in`, and read `bpm`, `confidence`, `beat` and `phase` out of it.
 Import that `.tox` into any other project.
@@ -110,7 +104,7 @@ can run in-process, as a sidecar, or not at all:
 ## Two runtimes
 
 | | Sidecar (default) | In-process |
-|---|---|---|
+| --- | --- | --- |
 | Where torch runs | separate process | inside TouchDesigner |
 | Environment must match TD's Python | **no** | yes — same minor version *and* architecture |
 | A native crash takes down TD | no | yes |
@@ -133,7 +127,7 @@ tdautobpm doctor            # diagnose environments
 ## Component outputs
 
 | Channel | Meaning |
-|---|---|
+| --- | --- |
 | `bpm` | detected tempo; 0 before the first estimate |
 | `confidence` | posterior mass near the estimate, 0–1 |
 | `beat` | 1 on the cook where the phase wraps, otherwise 0 |

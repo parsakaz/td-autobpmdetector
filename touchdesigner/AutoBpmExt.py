@@ -133,6 +133,9 @@ class AutoBpm:
         self.phase = 0.0
         self._beat = 0.0
         self._last_cook = None
+        self._retries = 0
+        self._retry_at = 0.0
+        self._last_status = ""
 
         self._sample_rate = 0
 
@@ -219,6 +222,8 @@ class AutoBpm:
         self.status = "stopped"
 
     def Restart(self):
+        self._retries = 0
+        self._retry_at = 0.0
         self.Start(self._sample_rate or 44100)
 
     def Reset(self):
@@ -246,15 +251,26 @@ class AutoBpm:
         active = bool(self._par("Active", True))
 
         if active and (self.detector is None or rate != self._sample_rate):
-            self.Start(rate)
+            # Backoff matters: Start() sets detector to None when it fails, so without
+            # it a failing start would relaunch a sidecar process every single frame.
+            if time.time() >= self._retry_at:
+                self._retries += 1
+                self.Start(rate)
+                if self.detector is None:
+                    self._retry_at = time.time() + min(30.0, 2.0 ** min(self._retries, 4))
+                else:
+                    self._retries = 0
 
+        dt = None
         if active and self.detector is not None and source is not None:
             try:
                 self._pump(source)
+                if source.numSamples > 0 and rate:
+                    dt = source.numSamples / float(rate)
             except Exception as exc:
                 self._fail(f"{exc}\n{traceback.format_exc()}")
 
-        self._advance_phase()
+        self._advance_phase(dt)
         self._write(scriptOp)
 
     def _pump(self, source):
@@ -283,17 +299,21 @@ class AutoBpm:
             self.error = err
             self.status = "error"
 
-    def _advance_phase(self):
+    def _advance_phase(self, dt=None):
         """Free-running beat phase at the detected tempo.
 
         The model estimates *tempo*, not beat position - it has no notion of where a
         downbeat falls. So this phase runs freely at the detected rate and is only
         aligned by an explicit Reset. Treat `beat` as a metronome locked to the right
         speed, not as an onset detector.
+
+        `dt` comes from the audio time slice when there is input, which keeps the
+        phase locked to the audio clock rather than jittering with frame times.
         """
-        now = time.time()
-        dt = 0.0 if self._last_cook is None else max(0.0, now - self._last_cook)
-        self._last_cook = now
+        if dt is None:
+            now = time.time()
+            dt = 0.0 if self._last_cook is None else max(0.0, now - self._last_cook)
+            self._last_cook = now
 
         prev = self.phase
         if self.bpm > 0:
@@ -301,17 +321,79 @@ class AutoBpm:
         self._beat = 1.0 if self.phase < prev else 0.0
 
     def _write(self, scriptOp):
+        """Fill the current time slice with the latest estimate.
+
+        Time Slice mode stays on and `numSamples` is left alone. Setting it warns
+        ("Editing numSamples is not supported in Time Slice mode"), and turning Time
+        Slice off would be worse: a time-sliced CHOP is guaranteed to cook every
+        frame, which is what keeps the audio stream unbroken. A non-time-sliced one
+        cooks only on demand, so any frame that did not cook would punch a hole in the
+        audio going to the detector.
+        """
         for name in CHANNELS:
             scriptOp.appendChan(name)
-        scriptOp.numSamples = 1
-        scriptOp["bpm"][0] = self.bpm
-        scriptOp["confidence"][0] = self.confidence
-        scriptOp["beat"][0] = self._beat
-        scriptOp["phase"][0] = self.phase
 
-        p = getattr(self.ownerComp.par, "Status", None)
-        if p is not None:
-            p.val = self.error.splitlines()[0] if self.error else self.status
+        n = max(1, scriptOp.numSamples)
+        scriptOp["bpm"].vals = [self.bpm] * n
+        scriptOp["confidence"].vals = [self.confidence] * n
+        scriptOp["phase"].vals = [self.phase] * n
+
+        # `beat` is an impulse, so it marks one sample rather than the whole slice.
+        beat = [0.0] * n
+        if self._beat:
+            beat[0] = 1.0
+        scriptOp["beat"].vals = beat
+
+        text = self.error.splitlines()[0] if self.error else self.status
+        par = getattr(self.ownerComp.par, "Status", None)
+        if par is not None:
+            par.val = text
+        # Echo to the textport as well, once per change: the Status parameter is
+        # read-only and easy to miss, and a silent component is hard to debug.
+        if text != self._last_status:
+            self._last_status = text
+            print("[AutoBpm] " + text)
+
+    def Diagnose(self):
+        """Print what the component can see. Call from the textport:
+
+            op('/project1/AutoBpm').Diagnose()
+        """
+        print("[AutoBpm] repo:       %s" % self.repo)
+        print("[AutoBpm] status:     %s" % self.status)
+        print("[AutoBpm] error:      %s" % (self.error or "(none)"))
+        print("[AutoBpm] runtime:    %s" % self._par("Runtime", "?"))
+        print("[AutoBpm] env par:    %r" % (self._par("Envpath", ""),))
+        if self.env is not None:
+            print("[AutoBpm] env:        %s" % self.env.python)
+            print("[AutoBpm]             %s %s, missing=%s"
+                  % (self.env.version, self.env.machine, self.env.missing or "nothing"))
+        print("[AutoBpm] detector:   %r" % (self.detector,))
+        print("[AutoBpm] bpm:        %.2f  confidence %.3f" % (self.bpm, self.confidence))
+        print("[AutoBpm] input rate: %s" % self._sample_rate)
+
+        source = None
+        script = self.ownerComp.op("detect")
+        if script is not None and script.inputs:
+            source = script.inputs[0]
+        if source is None:
+            print("[AutoBpm] NO AUDIO INPUT. Wire an Audio Device In CHOP into this "
+                  "component's input.")
+        else:
+            print("[AutoBpm] source:     %s  %d chan, %d samples @ %s Hz"
+                  % (source.path, len(source.chans()), source.numSamples, source.rate))
+            if source.numSamples:
+                peak = max(abs(v) for v in source.chans()[0].vals)
+                print("[AutoBpm] peak level: %.4f%s"
+                      % (peak, "  (SILENT - check the device)" if peak < 1e-6 else ""))
+
+        detector = self.detector
+        client = getattr(detector, "client", None)
+        if client is not None:
+            print("[AutoBpm] sidecar:    alive=%s connected=%s pending=%sB dropped=%sB"
+                  % (client.alive, client.connected, client.pending_bytes,
+                     client.dropped_bytes))
+            print("[AutoBpm] last error: %s" % (client.last_error or "(none)"))
 
     # -- tempo sync -------------------------------------------------------
 
