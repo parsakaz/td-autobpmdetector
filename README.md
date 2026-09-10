@@ -29,8 +29,15 @@ uv run tdautobpm listen                       # live, from a system audio input
 In TouchDesigner, open the textport and run:
 
 ```python
-run("/full/path/to/td-autobpmdetector/touchdesigner/build_component.py")
+p = "/full/path/to/td-autobpmdetector/touchdesigner/build_component.py"
+exec(open(p).read(), {"__file__": p})
 ```
+
+`run()` will not work here — it takes a string of Python *code*, not a file path. And
+passing `__file__` matters: TouchDesigner's textport namespace already defines one,
+pointing inside the application bundle, so a bare `exec(open(p).read())` would go looking
+for the component files in `TouchDesigner.app`. Setting `TDAUTOBPM_REPO` to the repository
+root works too.
 
 That builds `/AutoBpm` and writes `touchdesigner/AutoBpm.tox`. Wire an **Audio Device In**
 CHOP into its `audio_in`, and read `bpm`, `confidence`, `beat` and `phase` out of it.
@@ -173,12 +180,19 @@ assuming every reading is good — that is what `Autosync Min Confidence` is for
 ## Development
 
 ```bash
-uv run pytest          # 56 tests
+uv run pytest          # 71 tests
 ```
 
 The TouchDesigner component is built by script rather than committed as a hand-made binary,
 because `.toe`/`.tox` files are opaque blobs that cannot be reviewed or diffed. See
 `touchdesigner/build_component.py`.
+
+`tests/test_td_layer.py` covers the TouchDesigner-facing code that can be checked without
+TouchDesigner: neither `AutoBpmExt.py` nor `build_component.py` may trust `__file__` (the
+first lives inside the .tox with no file on disk; the second is `exec`'d, inheriting
+whatever `__file__` the caller had), and neither may import torch at module scope, since
+they run in TouchDesigner's interpreter. Building the component itself still has to be
+verified in TouchDesigner.
 
 ## Credits
 

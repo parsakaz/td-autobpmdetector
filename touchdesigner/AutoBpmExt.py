@@ -29,18 +29,82 @@ import threading
 import time
 import traceback
 
-# The repository root, so `src/tdautobpm` is importable from TouchDesigner.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(_HERE)
-_SRC = os.path.join(_REPO, "src")
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
-
-from tdautobpm import envresolve as E  # noqa: E402  (stdlib-only, safe here)
-from tdautobpm.client import SidecarClient  # noqa: E402  (stdlib-only)
-
 #: CHOP channels this component outputs.
 CHANNELS = ("bpm", "confidence", "beat", "phase")
+
+#: Marker that identifies a directory as the repository root.
+_MARKER = os.path.join("src", "tdautobpm", "engine.py")
+
+
+def find_repo(hint=None, owner=None):
+    """Locate the td-autobpmdetector checkout.
+
+    This module cannot use ``__file__``: it is stored as a Text DAT inside the .tox
+    and has no file on disk, so ``__file__`` is either undefined or points wherever
+    the importing namespace happened to point - in TouchDesigner, into the application
+    bundle. Candidates are therefore always confirmed by looking for `src/tdautobpm`.
+    """
+    candidates = []
+
+    if hint:
+        candidates.append(os.path.abspath(os.path.expanduser(os.path.expandvars(hint))))
+    if os.environ.get("TDAUTOBPM_REPO"):
+        candidates.append(
+            os.path.abspath(os.path.expanduser(os.environ["TDAUTOBPM_REPO"]))
+        )
+
+    # Walk up from the saved project and from the cwd.
+    starts = [os.getcwd()]
+    try:
+        import td
+
+        if td.project.folder:
+            starts.append(td.project.folder)
+    except Exception:
+        pass
+    if owner is not None:
+        try:
+            ext_dat = owner.op("AutoBpmExt")
+            if ext_dat is not None and ext_dat.par.file.eval():
+                starts.append(os.path.dirname(os.path.abspath(ext_dat.par.file.eval())))
+        except Exception:
+            pass
+
+    for start in starts:
+        directory = os.path.abspath(start)
+        for _ in range(6):
+            candidates.append(directory)
+            parent = os.path.dirname(directory)
+            if parent == directory:
+                break
+            directory = parent
+
+    for directory in candidates:
+        if os.path.isfile(os.path.join(directory, _MARKER)):
+            return directory
+
+    raise RuntimeError(
+        "Could not find the td-autobpmdetector checkout (no src/tdautobpm/engine.py "
+        "under any candidate). Set the component's Repo Path parameter to the "
+        "repository root, or the TDAUTOBPM_REPO environment variable."
+    )
+
+
+def load_support(repo):
+    """Put `<repo>/src` on sys.path and return the stdlib-only helper modules.
+
+    Deliberately not done at module scope: the repository location comes from a
+    parameter on the owning component, which does not exist until the extension is
+    constructed.
+    """
+    src = os.path.join(repo, "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+
+    from tdautobpm import envresolve
+    from tdautobpm.client import SidecarClient
+
+    return envresolve, SidecarClient
 
 
 class AutoBpm:
@@ -52,6 +116,17 @@ class AutoBpm:
         self.env = None
         self.status = "idle"
         self.error = ""
+
+        self.repo = None
+        self._E = None
+        self._SidecarClient = None
+        try:
+            self.repo = find_repo(self._par("Repopath", ""), owner=ownerComp)
+            self._E, self._SidecarClient = load_support(self.repo)
+        except Exception as exc:
+            self.error = str(exc)
+            self.status = "error"
+            print("[AutoBpm] " + self.error)
 
         self.bpm = 0.0
         self.confidence = 0.0
@@ -85,12 +160,16 @@ class AutoBpm:
         self.error = ""
         self._sample_rate = int(sample_rate)
 
+        if self._E is None:
+            # Repo never resolved; the message from __init__ still stands.
+            return
+
         runtime = self._par("Runtime", "sidecar")
         spec = (self._par("Envpath", "") or "").strip() or None
 
         try:
-            self.env = E.resolve(spec, project_root=_REPO)
-        except E.EnvError as exc:
+            self.env = self._E.resolve(spec, project_root=self.repo)
+        except self._E.EnvError as exc:
             self._fail(str(exc))
             return
 
@@ -103,18 +182,19 @@ class AutoBpm:
             self._fail(f"{exc}\n{traceback.format_exc()}")
 
     def _start_sidecar(self):
-        why = E.sidecar_incompatibility(self.env)
+        why = self._E.sidecar_incompatibility(self.env)
         if why:
             raise RuntimeError(f"environment cannot host the sidecar: {why}")
 
         self.detector = _SidecarDetector(
-            self.env.python, sample_rate=self._sample_rate, cwd=_REPO, **self._settings()
+            self._SidecarClient, self.env.python, sample_rate=self._sample_rate,
+            cwd=self.repo, **self._settings()
         )
         self.detector.start()
         self.status = "running (sidecar, %s)" % self.env.version
 
     def _start_inprocess(self):
-        why = E.inprocess_incompatibility(self.env)
+        why = self._E.inprocess_incompatibility(self.env)
         if why:
             raise RuntimeError(
                 "environment cannot be imported into TouchDesigner: %s.\n"
@@ -283,8 +363,8 @@ def set_project_tempo(bpm: float) -> bool:
 class _SidecarDetector:
     """Runs the model in a child process."""
 
-    def __init__(self, python, sample_rate, cwd=None, **options):
-        self.client = SidecarClient(
+    def __init__(self, client_cls, python, sample_rate, cwd=None, **options):
+        self.client = client_cls(
             python, sample_rate=sample_rate, cwd=cwd, autorestart=True, **options
         )
 
