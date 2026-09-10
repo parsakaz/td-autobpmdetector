@@ -374,14 +374,18 @@ class AutoBpm:
             beat[0] = 1.0
         scriptOp["beat"].vals = beat
 
+        # Only touch the Status parameter when it actually changes. Writing a
+        # parameter on every cook makes the component's Parameter Execute DAT
+        # re-evaluate inside the same cook pass, which TouchDesigner reports as
+        # "Cook dependency loop detected".
         text = self.error.splitlines()[0] if self.error else self.status
-        par = getattr(self.ownerComp.par, "Status", None)
-        if par is not None:
-            par.val = text
-        # Echo to the textport as well, once per change: the Status parameter is
-        # read-only and easy to miss, and a silent component is hard to debug.
         if text != self._last_status:
             self._last_status = text
+            par = getattr(self.ownerComp.par, "Status", None)
+            if par is not None:
+                par.val = text
+            # Echoed to the textport too: Status is read-only and easy to miss, and a
+            # silent component is hard to debug.
             print("[AutoBpm] " + text)
 
     def Tick(self):

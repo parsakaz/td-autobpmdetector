@@ -59,6 +59,25 @@ def _td(name):
     return obj
 
 
+def _append(page, kind, name, label, default, **attrs):
+    """Append a custom parameter and give it a value as well as a default.
+
+    `append*` creates the parameter already holding a zero/empty value, so setting
+    only `.default` afterwards leaves the *current* value untouched. That is how
+    Active ended up switched off and Update Rate at 0.0 on a freshly built component:
+    the defaults read correctly in the UI while the live values were all zero.
+    """
+    par = getattr(page, "append" + kind)(name, label=label)[0]
+    read_only = attrs.pop("readOnly", None)
+    for key, value in attrs.items():  # menu names must exist before a value is set
+        setattr(par, key, value)
+    par.default = default
+    par.val = default
+    if read_only is not None:  # applied last, so it cannot block the assignment above
+        par.readOnly = read_only
+    return par
+
+
 def _set_par(owner, candidates, value, required=True):
     """Set the first parameter on `owner` whose name matches one of `candidates`.
 
@@ -153,57 +172,45 @@ def build(parent_path="/"):
     # -- parameters --------------------------------------------------------
     page = comp.appendCustomPage("Auto BPM")
 
-    page.appendToggle("Active", label="Active")[0].default = True
+    _append(page, "Toggle", "Active", "Active", True)
 
-    p = page.appendMenu("Runtime", label="Runtime")[0]
-    p.menuNames = ["sidecar", "inprocess"]
-    p.menuLabels = ["Sidecar process", "In-process"]
-    p.default = "sidecar"
+    _append(page, "Menu", "Runtime", "Runtime", "sidecar",
+            menuNames=["sidecar", "inprocess"],
+            menuLabels=["Sidecar process", "In-process"])
 
     # Where the checkout lives. Defaults to wherever this was built from; change it
     # if the .tox is imported on another machine or the repo moves.
-    p = page.appendStr("Repopath", label="Repo Path")[0]
-    p.default = REPO
-    p.val = REPO
+    _append(page, "Str", "Repopath", "Repo Path", REPO)
 
-    p = page.appendStr("Envpath", label="Python Env")[0]
-    p.default = ""
     # Blank auto-detects: $TDAUTOBPM_PYTHON, $CONDA_PREFIX, $VIRTUAL_ENV, then .venv.
+    _append(page, "Str", "Envpath", "Python Env", "")
 
-    p = page.appendMenu("Torchdevice", label="Torch Device")[0]
-    p.menuNames = ["cpu", "mps", "cuda"]
-    p.menuLabels = ["CPU", "MPS (Apple)", "CUDA"]
-    p.default = "cpu"
+    _append(page, "Menu", "Torchdevice", "Torch Device", "cpu",
+            menuNames=["cpu", "mps", "cuda"],
+            menuLabels=["CPU", "MPS (Apple)", "CUDA"])
 
-    p = page.appendFloat("Updaterate", label="Update Rate (Hz)")[0]
-    p.default, p.normMin, p.normMax = 4.0, 0.5, 20.0
+    _append(page, "Float", "Updaterate", "Update Rate (Hz)", 4.0,
+            normMin=0.5, normMax=20.0)
 
-    p = page.appendMenu("Estimate", label="Estimator")[0]
-    p.menuNames = ["local_mean", "mode", "mean", "median"]
-    p.menuLabels = ["Local mean", "Mode", "Mean (biased)", "Median"]
-    p.default = "local_mean"
+    _append(page, "Menu", "Estimate", "Estimator", "local_mean",
+            menuNames=["local_mean", "mode", "mean", "median"],
+            menuLabels=["Local mean", "Mode", "Mean (biased)", "Median"])
 
-    p = page.appendFloat("Smoothing", label="Smoothing")[0]
-    p.default, p.normMin, p.normMax = 0.90, 0.0, 0.999
-
-    p = page.appendFloat("Resetseconds", label="Reset Every (s)")[0]
-    p.default, p.normMin, p.normMax = 5.0, 0.0, 60.0
-
-    p = page.appendFloat("Lockconfidence", label="Lock At Confidence")[0]
-    p.default, p.normMin, p.normMax = 0.0, 0.0, 1.0
+    _append(page, "Float", "Smoothing", "Smoothing", 0.90, normMin=0.0, normMax=0.999)
+    _append(page, "Float", "Resetseconds", "Reset Every (s)", 5.0,
+            normMin=0.0, normMax=60.0)
+    _append(page, "Float", "Lockconfidence", "Lock At Confidence", 0.0,
+            normMin=0.0, normMax=1.0)
 
     page.appendPulse("Reset", label="Reset")
     page.appendPulse("Restartdetector", label="Restart Detector")
-
     page.appendPulse("Synctempo", label="Sync Tempo")
-    page.appendToggle("Autosync", label="Autosync")[0].default = False
 
-    p = page.appendFloat("Autosyncconfidence", label="Autosync Min Confidence")[0]
-    p.default, p.normMin, p.normMax = 0.5, 0.0, 1.0
+    _append(page, "Toggle", "Autosync", "Autosync", False)
+    _append(page, "Float", "Autosyncconfidence", "Autosync Min Confidence", 0.5,
+            normMin=0.0, normMax=1.0)
 
-    p = page.appendStr("Status", label="Status")[0]
-    p.readOnly = True
-    p.default = "idle"
+    _append(page, "Str", "Status", "Status", "idle", readOnly=True)
 
     # -- network -----------------------------------------------------------
     in_chop = comp.create(_td("inCHOP"), "audio_in")
@@ -261,10 +268,15 @@ def build(parent_path="/"):
 
 FRAME_EXEC = '''# Frame callbacks for AutoBpm.
 #
-# A CHOP cooks only when something requests it. With nothing connected to the
-# component's output and no viewer open, the detect CHOP never cooked, so no audio
-# ever reached the detector. Forcing it here makes ingestion independent of whether
-# anything consumes the output.
+# An Execute DAT can fire on many events - onStart, onCreate, onExit, onFrameStart,
+# onFrameEnd, onPlayStateChange and so on - each gated by its own toggle on the DAT.
+# Only "Frame Start" is enabled here, and only onFrameStart is defined; the others
+# would never run even if they were written, so they are left out.
+#
+# It exists because a CHOP cooks only when something requests it. With nothing
+# connected to the component's output and no viewer open, the detect CHOP never
+# cooked, so no audio ever reached the detector. Driving it from the frame makes
+# ingestion independent of whether anything consumes the output.
 
 def onFrameStart(frame):
     parent().Tick()

@@ -30,12 +30,13 @@ In TouchDesigner, open the textport and run:
 
 ```python
 p = "/full/path/to/td-autobpmdetector/touchdesigner/build_component.py"
-exec(open(p).read(), {"__file__": p})
+exec(open(p).read(), {"__file__": p, "PARENT": "/project1"})
 ```
 
-That builds `/AutoBpm` and writes `touchdesigner/AutoBpm.tox`. Wire an **Audio Device In**
+That builds `/project1/AutoBpm` and writes the file `./touchdesigner/AutoBpm.tox`. Wire an **Audio Device In**
 CHOP into its `audio_in`, and read `bpm`, `confidence`, `beat` and `phase` out of it.
 Import that `.tox` into any other project.
+the PARENT variable is the path to the TouchDesigner component that will be built. Default is `/project1`, but you can change it to any other component path. The script will create the `AutoBpm` component inside the specified parent.
 
 ---
 
