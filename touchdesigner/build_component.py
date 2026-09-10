@@ -213,10 +213,19 @@ def build(parent_path="/"):
     script.nodeX, script.nodeY = -100, 0
     script.inputConnectors[0].connect(in_chop)
 
-    callbacks = comp.create(_td("textDAT"), "detect_callbacks")
+    # Creating a Script CHOP auto-creates its own `<name>_callbacks` DAT. Creating
+    # another with the same name gets it renamed to `detect_callbacks1`, leaving a
+    # stray default DAT in the network, so reuse whatever is already there.
+    callbacks = comp.op("detect_callbacks")
+    if callbacks is None:
+        callbacks = comp.create(_td("textDAT"), "detect_callbacks")
     callbacks.nodeX, callbacks.nodeY = -100, 200
     callbacks.text = CALLBACKS
     script.par.callbacks = callbacks
+
+    stray = comp.op("detect_callbacks1")
+    if stray is not None:
+        stray.destroy()
 
     out_chop = comp.create(_td("outCHOP"), "bpm_out")
     out_chop.nodeX, out_chop.nodeY = 200, 0

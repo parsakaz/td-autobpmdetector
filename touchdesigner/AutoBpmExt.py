@@ -137,6 +137,7 @@ class AutoBpm:
         self._retry_at = 0.0
         self._last_status = ""
         self._cooks = 0
+        self._seen = None
 
         self._sample_rate = 0
 
@@ -256,6 +257,17 @@ class AutoBpm:
         # an unconnected In CHOP reports the frame rate - and a sidecar would be
         # spawned to resample 60 Hz "audio".
         chans = source.chans() if source is not None else []
+
+        # Cook() and Diagnose() were disagreeing about the same input, so record what
+        # this callback actually sees rather than inferring it from the outcome.
+        self._seen = {
+            "n_inputs": len(scriptOp.inputs),
+            "source": source.path if source is not None else None,
+            "chans": len(chans),
+            "rate": (source.rate if source is not None else None),
+            "samples": (source.numSamples if source is not None else None),
+        }
+
         if not chans or not source.rate or source.rate < 1000:
             if not self.error:
                 self.status = (
@@ -381,9 +393,16 @@ class AutoBpm:
         all, so no audio ever reached the detector. An Execute DAT calls this from
         onFrameStart so ingestion does not depend on anyone consuming the output.
         """
-        script = self.ownerComp.op("detect")
-        if script is not None:
-            script.cook(force=True)
+        # Cook the *end* of the chain, not the middle. Forcing `detect` directly
+        # cooks it without necessarily having pulled `audio_in` for this frame, which
+        # can hand the callback an input with no channels yet. Cooking the output CHOP
+        # pulls detect, which pulls audio_in, in the normal order.
+        target = self.ownerComp.op("bpm_out") or self.ownerComp.op("detect")
+        if target is not None:
+            source = self.ownerComp.op("audio_in")
+            if source is not None:
+                source.cook(force=True)
+            target.cook(force=True)
 
     def Diagnose(self):
         """Print what the component can see. Call from the textport:
@@ -403,6 +422,7 @@ class AutoBpm:
         if self._cooks == 0:
             print("[AutoBpm] Cook() has NEVER run - the Script CHOP is not cooking.")
 
+        print("[AutoBpm] Cook sees:  %s" % (self._seen,))
         print("[AutoBpm] repo:       %s" % self.repo)
         print("[AutoBpm] status:     %s" % self.status)
         print("[AutoBpm] error:      %s" % (self.error or "(none)"))
