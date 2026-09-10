@@ -216,6 +216,13 @@ def build(parent_path="/"):
     out_chop.nodeX, out_chop.nodeY = 200, 0
     out_chop.inputConnectors[0].connect(script)
 
+    # A CHOP cooks only when something pulls on it, so with nothing connected
+    # downstream the detector never ran. This drives it every frame instead.
+    frame_exec = comp.create(_td("executeDAT"), "frame_exec")
+    frame_exec.nodeX, frame_exec.nodeY = -100, 400
+    frame_exec.text = FRAME_EXEC
+    _set_par(frame_exec, ["framestart", "onframestart"], True)
+
     par_exec = comp.create(_td("parameterexecuteDAT"), "par_exec")
     par_exec.nodeX, par_exec.nodeY = 200, 200
     _set_par(par_exec, ["op", "ops"], ".")
@@ -235,6 +242,19 @@ def build(parent_path="/"):
     comp.par.reinitextensions.pulse()
 
     return comp
+
+
+FRAME_EXEC = '''# Frame callbacks for AutoBpm.
+#
+# A CHOP cooks only when something requests it. With nothing connected to the
+# component's output and no viewer open, the detect CHOP never cooked, so no audio
+# ever reached the detector. Forcing it here makes ingestion independent of whether
+# anything consumes the output.
+
+def onFrameStart(frame):
+    parent().Tick()
+    return
+'''
 
 
 CALLBACKS = '''# Script CHOP callbacks for AutoBpm.

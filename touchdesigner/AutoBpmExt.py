@@ -247,8 +247,24 @@ class AutoBpm:
         scriptOp.clear()
         source = scriptOp.inputs[0] if scriptOp.inputs else None
 
-        rate = int(source.rate) if source is not None and source.rate else 44100
         active = bool(self._par("Active", True))
+
+        # Only start once there is real audio. Without this the detector would be
+        # built for the input's nominal rate - 60 Hz when nothing is connected, since
+        # an unconnected In CHOP reports the frame rate - and a sidecar would be
+        # spawned to resample 60 Hz "audio".
+        chans = source.chans() if source is not None else []
+        if not chans or not source.rate or source.rate < 1000:
+            if not self.error:
+                self.status = (
+                    "waiting for audio input - wire an Audio Device In CHOP into this "
+                    "component"
+                )
+            self._advance_phase(None)
+            self._write(scriptOp)
+            return
+
+        rate = int(source.rate)
 
         if active and (self.detector is None or rate != self._sample_rate):
             # Backoff matters: Start() sets detector to None when it fails, so without
@@ -354,6 +370,19 @@ class AutoBpm:
             self._last_status = text
             print("[AutoBpm] " + text)
 
+    def Tick(self):
+        """Force the detector to run for this frame.
+
+        Time Slice mode guarantees a CHOP *receives* a time slice when it cooks, but
+        it does not make it cook: a CHOP cooks only when something pulls on it. With
+        nothing connected downstream and no viewer open, the Script CHOP never ran at
+        all, so no audio ever reached the detector. An Execute DAT calls this from
+        onFrameStart so ingestion does not depend on anyone consuming the output.
+        """
+        script = self.ownerComp.op("detect")
+        if script is not None:
+            script.cook(force=True)
+
     def Diagnose(self):
         """Print what the component can see. Call from the textport:
 
@@ -380,10 +409,17 @@ class AutoBpm:
             print("[AutoBpm] NO AUDIO INPUT. Wire an Audio Device In CHOP into this "
                   "component's input.")
         else:
+            chans = source.chans()
             print("[AutoBpm] source:     %s  %d chan, %d samples @ %s Hz"
-                  % (source.path, len(source.chans()), source.numSamples, source.rate))
-            if source.numSamples:
-                peak = max(abs(v) for v in source.chans()[0].vals)
+                  % (source.path, len(chans), source.numSamples, source.rate))
+            if not chans:
+                print("[AutoBpm] NOTHING CONNECTED to this component's input. Wire an "
+                      "Audio Device In CHOP into it.")
+            elif not source.rate or source.rate < 1000:
+                print("[AutoBpm] input rate is %s Hz, which is a frame rate, not an "
+                      "audio rate - the input is not audio." % source.rate)
+            elif source.numSamples:
+                peak = max(abs(v) for v in chans[0].vals)
                 print("[AutoBpm] peak level: %.4f%s"
                       % (peak, "  (SILENT - check the device)" if peak < 1e-6 else ""))
 
