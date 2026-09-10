@@ -1,0 +1,36 @@
+td-autobpmdetector
+==================
+
+This project is a fork of:
+
+    tdautobpmsync
+    https://github.com/shhhum/tdautobpmsync
+    Copyright (c) shhhum
+
+The following are the work of the upstream author and are used here substantially
+unchanged:
+
+    src/tdautobpm/model.py          - TempoNet architecture (was temponet/model.py)
+    models/temponet_ckpt.pt         - trained weights, ~7,000 tracks
+    src/tdautobpm/engine.py         - streaming predictor (was temponet/infer.py),
+                                      modified; see the module docstring and README
+                                      for a list of changes
+    test_tracks/yuqt.mp3            - demo audio
+    touchdesigner/autobpmsync-upstream.toe
+                                    - the original TouchDesigner project file
+
+LICENSING NOTE
+--------------
+
+At the time of forking, the upstream repository carried no LICENSE file. Absent an
+explicit licence, the default position is that all rights are reserved by the
+copyright holder: forking on GitHub is permitted under GitHub's Terms of Service,
+but redistribution of modified copies and of the trained weights is not clearly
+granted.
+
+If you intend to redistribute this project or use it beyond personal experimentation,
+please ask the upstream author to publish a licence first.
+
+Everything else in this repository - the environment resolution, sidecar protocol and
+server, client, CLI, resampler, TouchDesigner extension and component builder, and
+tests - is original work in this fork.

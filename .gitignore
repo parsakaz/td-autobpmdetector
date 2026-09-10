@@ -1,6 +1,17 @@
 .DS_Store
 .env
-*/__pycache__
+.venv
+*Env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.vscode/
+.idea/
+build/
+dist/
+*.egg-info/
+
+# TouchDesigner
+*.toe.*
 autobpmsync.*.toe
-*Env
-.vscode
+Backup/
