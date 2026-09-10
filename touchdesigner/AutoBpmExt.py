@@ -136,6 +136,7 @@ class AutoBpm:
         self._retries = 0
         self._retry_at = 0.0
         self._last_status = ""
+        self._cooks = 0
 
         self._sample_rate = 0
 
@@ -244,6 +245,7 @@ class AutoBpm:
 
     def Cook(self, scriptOp):
         """Drive one cook of the Script CHOP. Called from the CHOP's callback."""
+        self._cooks += 1
         scriptOp.clear()
         source = scriptOp.inputs[0] if scriptOp.inputs else None
 
@@ -387,7 +389,20 @@ class AutoBpm:
         """Print what the component can see. Call from the textport:
 
             op('/project1/AutoBpm').Diagnose()
+
+        Forces a cook first, so the reported status reflects the network as it is now
+        rather than whenever the component last happened to cook.
         """
+        before = self._cooks
+        try:
+            self.Tick()
+        except Exception as exc:
+            print("[AutoBpm] Tick() raised: %s" % exc)
+        print("[AutoBpm] cooks:      %d total, %d from this forced Tick"
+              % (self._cooks, self._cooks - before))
+        if self._cooks == 0:
+            print("[AutoBpm] Cook() has NEVER run - the Script CHOP is not cooking.")
+
         print("[AutoBpm] repo:       %s" % self.repo)
         print("[AutoBpm] status:     %s" % self.status)
         print("[AutoBpm] error:      %s" % (self.error or "(none)"))
@@ -422,6 +437,26 @@ class AutoBpm:
                 peak = max(abs(v) for v in chans[0].vals)
                 print("[AutoBpm] peak level: %.4f%s"
                       % (peak, "  (SILENT - check the device)" if peak < 1e-6 else ""))
+
+        # Internal wiring: a component imported from an older .tox will be missing
+        # pieces that a later build added.
+        children = sorted(c.name for c in self.ownerComp.children)
+        print("[AutoBpm] children:   %s" % ", ".join(children))
+        for name in ("detect", "frame_exec", "par_exec", "AutoBpmExt"):
+            if self.ownerComp.op(name) is None:
+                print("[AutoBpm] MISSING %s - this component predates the current "
+                      "build_component.py. Rebuild and re-import the .tox." % name)
+
+        fe = self.ownerComp.op("frame_exec")
+        if fe is not None:
+            pars = {p.name: p.eval() for p in fe.pars("*")}
+            interesting = {k: v for k, v in pars.items()
+                           if k in ("active", "framestart", "onframestart", "file")}
+            print("[AutoBpm] frame_exec: %s" % interesting)
+            if not (pars.get("framestart") or pars.get("onframestart")):
+                print("[AutoBpm] frame_exec is not set to fire on frame start; that is "
+                      "why nothing cooks. Available pars: %s"
+                      % ", ".join(sorted(pars)))
 
         detector = self.detector
         client = getattr(detector, "client", None)

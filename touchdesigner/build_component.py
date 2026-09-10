@@ -12,6 +12,12 @@ application bundle, so a bare ``exec(open(p).read())`` looks for AutoBpmExt.py i
 ``TouchDesigner.app`` and fails. If you would rather not pass it, set the environment
 variable ``TDAUTOBPM_REPO`` to the repository root instead.
 
+By default the component is built at ``/AutoBpm``. To build it inside an existing
+network instead - handy while iterating, since it avoids re-importing the .tox - pass
+``PARENT``::
+
+    exec(open(p).read(), {"__file__": p, "PARENT": "/project1"})
+
 Alternatively, drag the file into a Text DAT and run that::
 
     op('/path/to/thisDAT').run()
@@ -289,11 +295,16 @@ def onValueChange(par, prev):
 
 def main():
     print(f"[AutoBpm] repo: {REPO}")
-    comp = build()
+    # Build wherever the caller asked. While iterating it is easier to rebuild
+    # straight into the network you are working in than to re-import the .tox:
+    #     exec(open(p).read(), {"__file__": p, "PARENT": "/project1"})
+    parent_path = globals().get("PARENT") or os.environ.get("TDAUTOBPM_PARENT") or "/"
+    comp = build(parent_path)
     comp.save(TOX_PATH)
     print(f"[AutoBpm] built {comp.path}")
     print(f"[AutoBpm] saved {TOX_PATH}")
-    print("[AutoBpm] wire an Audio Device In CHOP into its audio_in, then read Status.")
+    print("[AutoBpm] connect an Audio Device In CHOP to this component's input,")
+    print("[AutoBpm] then: op('%s').Diagnose()" % comp.path)
     return comp
 
 
