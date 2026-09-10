@@ -137,6 +137,23 @@ tdautobpm doctor            # diagnose environments
 `Sync Tempo` writes `bpm` to the timeline tempo; `Autosync` does it continuously, gated by
 `Autosync Min Confidence`.
 
+## Control panel
+
+The component contains a `ui` container with a BPM readout and Start/Stop and Reset
+buttons. Open the component's viewer to use it, or drag `ui` out to a panel of your own.
+Start/Stop flips the `Active` parameter rather than holding state itself, so the parameter
+stays the single source of truth; switching it off shuts the sidecar process down rather
+than leaving it running on silence.
+
+If something looks wrong, ask the component:
+
+```python
+op('/project1/AutoBpm').Diagnose()
+```
+
+It forces a cook and reports the resolved environment, what the cook callback actually
+sees on its input, peak input level, and sidecar liveness and backlog.
+
 ## What it does and does not do
 
 **Tempo, not beat position.** The model estimates *how fast*, not *where the downbeat is*.

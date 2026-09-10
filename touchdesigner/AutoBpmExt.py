@@ -252,6 +252,18 @@ class AutoBpm:
 
         active = bool(self._par("Active", True))
 
+        # Switching Active off tears the detector down rather than merely starving it,
+        # so "stop" actually stops the sidecar process instead of leaving it running
+        # on silence.
+        if not active:
+            if self.detector is not None:
+                self.Stop()
+                self._retries = 0
+                self._retry_at = 0.0
+            self._advance_phase(None)
+            self._write(scriptOp)
+            return
+
         # Only start once there is real audio. Without this the detector would be
         # built for the input's nominal rate - 60 Hz when nothing is connected, since
         # an unconnected In CHOP reports the frame rate - and a sidecar would be
@@ -280,7 +292,7 @@ class AutoBpm:
 
         rate = int(source.rate)
 
-        if active and (self.detector is None or rate != self._sample_rate):
+        if self.detector is None or rate != self._sample_rate:
             # Backoff matters: Start() sets detector to None when it fails, so without
             # it a failing start would relaunch a sidecar process every single frame.
             if time.time() >= self._retry_at:
@@ -292,7 +304,7 @@ class AutoBpm:
                     self._retries = 0
 
         dt = None
-        if active and self.detector is not None and source is not None:
+        if self.detector is not None:
             try:
                 self._pump(source)
                 if source.numSamples > 0 and rate:

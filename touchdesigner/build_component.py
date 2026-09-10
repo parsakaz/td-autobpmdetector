@@ -256,6 +256,8 @@ def build(parent_path="/"):
     _set_par(par_exec, ["onpulse", "pulse", "parpulse"], True)
     par_exec.text = PAR_EXEC
 
+    build_ui(comp)
+
     # -- extension, last, now that its parameters exist --------------------
     # `me.op(...)` rather than a bare `op(...)`: the extension expression is evaluated
     # with `me` bound to this component, so this resolves unambiguously to the child.
@@ -280,6 +282,86 @@ FRAME_EXEC = '''# Frame callbacks for AutoBpm.
 
 def onFrameStart(frame):
     parent().Tick()
+    return
+'''
+
+
+def build_ui(comp):
+    """A small control panel: BPM readout, Start/Stop and Reset.
+
+    Every parameter here is set through _set_par(..., required=False), so a name that
+    differs in another TouchDesigner build degrades the panel rather than aborting the
+    whole component build.
+    """
+    ui = comp.create(_td("containerCOMP"), "ui")
+    ui.nodeX, ui.nodeY = 500, 0
+    for name, value in (("w", 420), ("h", 150), ("opacity", 1.0)):
+        _set_par(ui, [name], value, required=False)
+    _set_par(ui, ["align"], "None", required=False)
+
+    readout = ui.create(_td("textTOP"), "readout")
+    readout.nodeX, readout.nodeY = 0, 200
+    for name, value in (("w", 400), ("h", 70), ("x", 10), ("y", 70)):
+        _set_par(readout, [name], value, required=False)
+    _set_par(readout, ["resolutionw"], 400, required=False)
+    _set_par(readout, ["resolutionh"], 70, required=False)
+    _set_par(readout, ["fontsizex", "fontsize"], 24, required=False)
+    _set_par(readout, ["alignx"], "center", required=False)
+    _set_par(readout, ["aligny"], "center", required=False)
+
+    # An expression, so the readout follows the CHOP without any callback.
+    text_par = getattr(readout.par, "text", None)
+    if text_par is not None:
+        text_par.expr = READOUT_EXPR
+    else:
+        print("[AutoBpm] textTOP has no 'text' parameter; readout left blank")
+
+    for index, (name, label) in enumerate(
+        (("btn_active", "Start / Stop"), ("btn_reset", "Reset"))
+    ):
+        button = ui.create(_td("buttonCOMP"), name)
+        button.nodeX, button.nodeY = index * 200, 0
+        for par_name, value in (
+            ("w", 190), ("h", 50), ("x", 10 + index * 205), ("y", 10)
+        ):
+            _set_par(button, [par_name], value, required=False)
+        _set_par(button, ["buttontype"], "Momentary", required=False)
+        _set_par(button, ["text0", "text"], label, required=False)
+        _set_par(button, ["text1"], label, required=False)
+
+    ui_exec = ui.create(_td("panelexecuteDAT"), "ui_exec")
+    ui_exec.nodeX, ui_exec.nodeY = 0, -200
+    ui_exec.text = UI_EXEC
+    _set_par(ui_exec, ["panel", "panels", "op"], "btn_*", required=False)
+    _set_par(ui_exec, ["offtoon", "onofftoon"], True, required=False)
+
+    # Show the panel when the component's viewer is opened.
+    _set_par(comp, ["opviewer"], ui.path, required=False)
+    return ui
+
+
+#: Expression driving the readout. `[0]` reads the first sample of the time slice.
+READOUT_EXPR = (
+    "'%.1f BPM   conf %.2f   %s' % ("
+    "op('../bpm_out')['bpm'][0], "
+    "op('../bpm_out')['confidence'][0], "
+    "'RUNNING' if op('..').par.Active.eval() else 'STOPPED')"
+)
+
+
+UI_EXEC = '''# Panel callbacks for the AutoBpm UI.
+#
+# Both buttons are momentary, so a press is a single off-to-on transition. The
+# Start/Stop button flips the component's Active parameter rather than holding the
+# state itself, which keeps the parameter the single source of truth.
+
+def onOffToOn(panelValue):
+    button = panelValue.owner
+    comp = button.parent(2)          # button -> ui -> AutoBpm
+    if button.name == 'btn_reset':
+        comp.Reset()
+    elif button.name == 'btn_active':
+        comp.par.Active = not comp.par.Active.eval()
     return
 '''
 
