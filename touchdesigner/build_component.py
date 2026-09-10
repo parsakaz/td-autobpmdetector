@@ -53,6 +53,30 @@ def _td(name):
     return obj
 
 
+def _set_par(owner, candidates, value, required=True):
+    """Set the first parameter on `owner` whose name matches one of `candidates`.
+
+    Parameter names on built-in operators are not stable across TouchDesigner
+    versions, and guessing wrong aborts the whole build. So try the known spellings,
+    and when none match, report what the operator actually has instead of raising an
+    AttributeError with no context.
+    """
+    for name in candidates:
+        par = getattr(owner.par, name, None)
+        if par is not None:
+            par.val = value
+            return name
+
+    available = sorted(p.name for p in owner.pars("*"))
+    message = (
+        f"{owner.path}: none of {candidates} exist. Available: {', '.join(available)}"
+    )
+    if required:
+        raise RuntimeError(message)
+    print("[AutoBpm] " + message)
+    return None
+
+
 def _locate_here():
     """Find the directory holding this script and AutoBpmExt.py.
 
@@ -116,9 +140,9 @@ def build(parent_path="/"):
         ext.text = f.read()
     ext.nodeX, ext.nodeY = -400, 200
 
-    comp.par.extension1 = "op('AutoBpmExt').module.AutoBpm(me)"
-    comp.par.promoteextension1 = True
-    comp.par.reinitextensions.pulse()
+    # Wiring the extension is deliberately left until the end of build(): the
+    # extension's __init__ reads custom parameters, so instantiating it before those
+    # exist makes it fail on a half-built component.
 
     # -- parameters --------------------------------------------------------
     page = comp.appendCustomPage("Auto BPM")
@@ -194,17 +218,22 @@ def build(parent_path="/"):
 
     par_exec = comp.create(_td("parameterexecuteDAT"), "par_exec")
     par_exec.nodeX, par_exec.nodeY = 200, 200
-    par_exec.par.op = "."
-    par_exec.par.pars = (
-        "Reset Restartdetector Synctempo Runtime Envpath Torchdevice Repopath"
-    )
-    par_exec.par.custom = True
-    par_exec.par.builtin = False
-    par_exec.par.valuechange = True
-    par_exec.par.pulse = True
+    _set_par(par_exec, ["op", "ops"], ".")
+    _set_par(par_exec, ["pars", "parameters"],
+             "Reset Restartdetector Synctempo Runtime Envpath Torchdevice Repopath")
+    _set_par(par_exec, ["custom"], True, required=False)
+    _set_par(par_exec, ["builtin"], False, required=False)
+    _set_par(par_exec, ["valuechange", "onvaluechange"], True)
+    _set_par(par_exec, ["onpulse", "pulse", "parpulse"], True)
     par_exec.text = PAR_EXEC
 
+    # -- extension, last, now that its parameters exist --------------------
+    # `me.op(...)` rather than a bare `op(...)`: the extension expression is evaluated
+    # with `me` bound to this component, so this resolves unambiguously to the child.
+    comp.par.extension1 = "me.op('AutoBpmExt').module.AutoBpm(me)"
+    comp.par.promoteextension1 = True
     comp.par.reinitextensions.pulse()
+
     return comp
 
 
