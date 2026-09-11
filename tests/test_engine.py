@@ -82,7 +82,7 @@ def test_confidence_predicts_accuracy(bpm):
 def test_confidence_is_meaningful_on_a_clean_pulse():
     """A steady click track should not report near-zero confidence.
 
-    Upstream reported the height of a single 1-BPM bin, which sits around 0.04 even
+    The original reported the height of a single 1-BPM bin, which sits around 0.04 even
     when the estimate is correct. Confidence is now the mass near the mode.
     """
     _, confidence, _ = run(click_track(128)).predict()
@@ -95,6 +95,44 @@ def test_mean_estimator_is_biased_toward_the_range_centre():
     biased, _, _ = run(click_track(truth), estimate="mean").predict()
     local, _, _ = run(click_track(truth), estimate="local_mean").predict()
     assert metrical_error(local, truth) < metrical_error(biased, truth)
+
+
+class TestRange:
+    """A known tempo range, folded into by octaves."""
+
+    def test_a_range_recovers_the_octave_the_model_misses(self):
+        """The case that motivated it: the model calls 174 BPM clicks 87."""
+        x = click_track(174)
+        free, _, _ = run(x).predict()
+        ranged, confidence, _ = run(x, range_min=160, range_max=180).predict()
+        assert metrical_error(free, 174) < 1.0
+        assert abs(ranged - 174) < 1.0, f"got {ranged}"
+        assert confidence > 0.3
+
+    def test_a_range_below_the_tempo_halves_it(self):
+        estimate, _, _ = run(click_track(170), range_min=80, range_max=95).predict()
+        assert abs(estimate - 85) < 1.0
+
+    def test_music_outside_the_range_stays_inside_it_with_no_confidence(self):
+        estimate, confidence, _ = run(
+            click_track(140), range_min=160, range_max=180
+        ).predict()
+        assert 160 <= estimate <= 180
+        assert confidence < 0.1
+
+    def test_can_be_changed_live(self):
+        p = run(click_track(174))
+        p.set_range(160, 180)
+        estimate, _, _ = p.predict()
+        assert abs(estimate - 174) < 1.0
+        p.set_range(0, 0)
+        assert p.range is None
+
+    @pytest.mark.parametrize("bounds", [(0, 0), (0, 180), (180, 160), (100.2, 100.4)])
+    def test_a_blank_or_impossible_range_is_ignored(self, bounds):
+        p = make_predictor(device="cpu", input_sample_rate=SR)
+        p.set_range(*bounds)
+        assert p.range is None
 
 
 def test_reset_clears_state():

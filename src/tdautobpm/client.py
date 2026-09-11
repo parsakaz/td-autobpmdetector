@@ -78,7 +78,9 @@ class SidecarClient:
         return self.proc is not None and self.proc.poll() is None
 
     def _argv(self) -> List[str]:
-        argv = [self.python, "-m", "tdautobpm.sidecar"]
+        # --once: this process is ours alone, so it exits with our connection rather
+        # than outliving the host.
+        argv = [self.python, "-m", "tdautobpm.sidecar", "--once"]
         if self.port:
             argv += ["--port", str(self.port)]
         else:
@@ -91,6 +93,8 @@ class SidecarClient:
             ("reset_seconds", "--reset-seconds"),
             ("lock_confidence", "--lock-confidence"),
             ("smooth_alpha", "--smooth-alpha"),
+            ("range_min", "--range-min"),
+            ("range_max", "--range-max"),
             ("checkpoint", "--checkpoint"),
         ):
             val = self.options.get(key)

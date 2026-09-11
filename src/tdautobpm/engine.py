@@ -1,15 +1,15 @@
 """Streaming tempo estimation with TempoNet.
 
-Derived from ``temponet/infer.py`` in https://github.com/shhhum/tdautobpmsync (see NOTICE).
-Changes from upstream:
+Derived from ``temponet/infer.py`` in shhhum's tdautobpmsync
+(https://github.com/shhhum/tdautobpmsync), which also provides the TempoNet model and
+its trained weights. On top of the original this adds:
 
-* package-relative imports, so the module works without ``sys.path`` surgery;
-* accepts audio at its native rate and resamples with a stateful streaming resampler
-  (:mod:`tdautobpm.resample`), instead of assuming the caller supplies 22.05 kHz;
-* the periodic posterior reset is optional and can latch off once the estimate is
-  stable, rather than unconditionally discarding all accumulated evidence every few
-  seconds;
-* the MPS-to-CPU downgrade for STFT is logged rather than silent.
+* audio at its native rate, through a stateful streaming resampler
+  (:mod:`tdautobpm.resample`), instead of requiring 22.05 kHz input;
+* a local-mean estimator and a confidence measured as probability mass near the mode;
+* an optional, latchable periodic reset of the accumulated posterior;
+* a tempo range that the estimate is folded into by octaves (:meth:`set_range`);
+* live reconfiguration (:meth:`configure`).
 """
 
 from __future__ import annotations
@@ -187,14 +187,20 @@ class TempoStreamPredictorAccum:
         use_octave_score: bool = True,
         input_sample_rate: Optional[int] = None,
         lock_confidence: float = 0.0,
+        range_min: float = 0.0,
+        range_max: float = 0.0,
     ):
         """
         Args:
+            range_min, range_max: the tempo range the music is known to be in, e.g.
+                160-180 for drum and bass. The estimate is folded by octaves into it,
+                so a posterior that favours 85 reports 170. ``0`` for either leaves
+                the model's full range; see :meth:`set_range`.
             input_sample_rate: rate of the audio handed to :meth:`push_audio`. When it
                 differs from the model's rate the stream is resampled internally. Pass
                 ``None`` to declare the audio is already at the model rate.
             reset_seconds: how often to flatten the accumulated posterior back to
-                uniform. Upstream fixed this at 5 s, which throws away all evidence
+                uniform. The original fixed this at 5 s, which throws away all evidence
                 several times a minute and keeps reported confidence very low. Pass
                 ``None`` or ``0`` to accumulate indefinitely.
             lock_confidence: once the posterior mode reaches this confidence, stop
@@ -276,6 +282,10 @@ class TempoStreamPredictorAccum:
         self.valid_half = (half_bpm >= self.bpm_min) & (half_bpm <= self.bpm_max)
         self.valid_double = (dbl_bpm >= self.bpm_min) & (dbl_bpm <= self.bpm_max)
 
+        self.range = None
+        self._fold = None
+        self.set_range(range_min, range_max)
+
         # Cached log-mel components (no checkpoint dependency)
         self.logmel_cfg = _mel_cfg_from_audio(cfg)
         self.logmel_device = select_logmel_device(device)
@@ -301,6 +311,76 @@ class TempoStreamPredictorAccum:
         self._filled = 0
         self._start_time = time.time()
         self._last_conf = 0.0
+
+    def set_range(self, range_min: float = 0.0, range_max: float = 0.0) -> None:
+        """Restrict the estimate to a tempo range, folding it there by octaves.
+
+        Metrical ambiguity is the usual failure: drum and bass at 170 carries as much
+        evidence for 85. Given a range, only bins with an octave image inside it (the
+        bin itself, preferably, else half or double it, and so on) can be the mode,
+        and the estimate is reported at that image. Evidence is not thrown away:
+        the model still sees everything, and the octave-consistent score still pools
+        the half and double of each candidate.
+
+        A range with no image of any bin, or a blank one (either end ``<= 0``), leaves
+        the full model range.
+        """
+        lo, hi = float(range_min or 0.0), float(range_max or 0.0)
+        self.range = None
+        self._fold = None
+        if lo <= 0 or hi <= 0 or hi <= lo:
+            return
+
+        # Per bin, the power of two that lands it in range, nearest octave first.
+        fold = torch.zeros_like(self.bpm_bins)
+        for k in (0, 1, -1, 2, -2):
+            factor = 2.0 ** k
+            image = self.bpm_bins * factor
+            fits = (fold == 0) & (image >= lo) & (image <= hi)
+            fold = torch.where(fits, torch.full_like(fold, factor), fold)
+        if not bool((fold > 0).any()):
+            log.warning("tempo range %.0f-%.0f holds no octave of %d-%d BPM; ignoring it",
+                        lo, hi, self.bpm_min, self.bpm_max)
+            return
+        self.range = (lo, hi)
+        self._fold = fold
+
+    def configure(self, **cfg) -> None:
+        """Change settings on a running predictor, without losing its evidence.
+
+        Covers everything but the checkpoint, device and input rate, which need a new
+        predictor. Unknown keys are ignored, so a whole settings dict can be passed.
+        """
+        if cfg.get("update_hz"):
+            self.update_hz = float(cfg["update_hz"])
+            self.update_n = max(1, int(self.cfg.sample_rate / self.update_hz))
+        if "estimate" in cfg:
+            self.estimate = str(cfg["estimate"])
+        if "smooth_alpha" in cfg:
+            self.smooth_alpha = float(cfg["smooth_alpha"])
+        if "lock_confidence" in cfg:
+            self.lock_confidence = float(cfg["lock_confidence"])
+        if "reset_seconds" in cfg:
+            rs = cfg["reset_seconds"]
+            self.reset_seconds = None if not rs or float(rs) <= 0 else float(rs)
+            self._reset_n = (
+                max(1, int(self.reset_seconds * self.cfg.sample_rate))
+                if self.reset_seconds is not None
+                else None
+            )
+        if "range_min" in cfg or "range_max" in cfg:
+            lo, hi = self.range or (0.0, 0.0)
+            self.set_range(cfg.get("range_min", lo), cfg.get("range_max", hi))
+
+    def fold_bpm(self, bpm: float) -> float:
+        """Move a tempo into the range by octaves, if it can be; else unchanged."""
+        if self.range is None or bpm <= 0:
+            return bpm
+        lo, hi = self.range
+        for k in (0, 1, -1, 2, -2):
+            if lo <= bpm * 2.0 ** k <= hi:
+                return bpm * 2.0 ** k
+        return bpm
 
     def reset(self) -> None:
         """Flatten the posterior, clear the audio buffer and unlatch."""
@@ -419,13 +499,16 @@ class TempoStreamPredictorAccum:
                     posterior[self.idx_double],
                     torch.zeros_like(score),
                 )
-            idx_mode = int(torch.argmax(score).item())
         else:
-            idx_mode = int(torch.argmax(posterior).item())
+            score = posterior
+        if self._fold is not None:
+            # Only bins with an octave image in the range may be the mode.
+            score = torch.where(self._fold > 0, score, torch.full_like(score, -1.0))
+        idx_mode = int(torch.argmax(score).item())
 
         # BPM estimation options.
         #
-        # "mean" - the global posterior mean - is upstream's default and is badly
+        # "mean" - the global posterior mean - is the original default and is badly
         # biased: the posterior is broad and usually multimodal (the true tempo plus
         # its half/double octaves), so the mean lands between the modes and drifts
         # toward the middle of the BPM range regardless of the actual tempo. On
@@ -450,6 +533,17 @@ class TempoStreamPredictorAccum:
             w = posterior[lo:hi]
             mass = w.sum().clamp_min(self.eps)
             bpm = float(((w * self.bpm_bins[lo:hi]).sum() / mass).item())
+
+        # Report the estimate at its image in the range. Mode-based estimates use the
+        # mode's own octave, so a local mean of 79.6 around a mode of 80 becomes 159.2
+        # rather than being judged on its own and left out of range.
+        if self._fold is not None:
+            if self.estimate in ("mode", "local_mean"):
+                bpm *= float(self._fold[idx_mode].item())
+            else:
+                bpm = self.fold_bpm(bpm)
+            # The local mean can spill a little past an edge; a range is a promise.
+            bpm = min(max(bpm, self.range[0]), self.range[1])
 
         # Confidence as the probability mass near the mode, not the single-bin height.
         # With 141 one-BPM bins a correct-but-slightly-spread estimate scores ~0.04 on
@@ -493,6 +587,8 @@ def analyze_file(
     accumulate: bool = True,
     update_hz: float = 4.0,
     progress=None,
+    range_min: float = 0.0,
+    range_max: float = 0.0,
 ) -> dict:
     """Estimate the tempo of a whole audio file.
 
@@ -510,6 +606,8 @@ def analyze_file(
             input_sample_rate=sr,
             reset_seconds=None if accumulate else 5.0,
             update_hz=update_hz,
+            range_min=range_min,
+            range_max=range_max,
         )
 
         history = []

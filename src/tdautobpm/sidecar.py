@@ -38,6 +38,8 @@ class BpmServer:
         reset_seconds: Optional[float] = 5.0,
         lock_confidence: float = 0.0,
         smooth_alpha: float = 0.90,
+        range_min: float = 0.0,
+        range_max: float = 0.0,
     ):
         self.settings = dict(
             checkpoint=checkpoint,
@@ -48,6 +50,8 @@ class BpmServer:
             reset_seconds=reset_seconds,
             lock_confidence=lock_confidence,
             smooth_alpha=smooth_alpha,
+            range_min=range_min,
+            range_max=range_max,
         )
         self.predictor = None
         self._build()
@@ -71,6 +75,8 @@ class BpmServer:
             reset_seconds=s["reset_seconds"],
             lock_confidence=s["lock_confidence"],
             smooth_alpha=s["smooth_alpha"],
+            range_min=s["range_min"],
+            range_max=s["range_max"],
         )
         log.info("model ready in %.2fs", time.time() - t0)
 
@@ -88,24 +94,7 @@ class BpmServer:
             self._build()
             return
 
-        p = self.predictor
-        if "update_hz" in cfg and cfg["update_hz"]:
-            p.update_hz = float(cfg["update_hz"])
-            p.update_n = max(1, int(p.cfg.sample_rate / p.update_hz))
-        if "estimate" in cfg:
-            p.estimate = str(cfg["estimate"])
-        if "smooth_alpha" in cfg:
-            p.smooth_alpha = float(cfg["smooth_alpha"])
-        if "lock_confidence" in cfg:
-            p.lock_confidence = float(cfg["lock_confidence"])
-        if "reset_seconds" in cfg:
-            rs = cfg["reset_seconds"]
-            p.reset_seconds = None if not rs or float(rs) <= 0 else float(rs)
-            p._reset_n = (
-                max(1, int(p.reset_seconds * p.cfg.sample_rate))
-                if p.reset_seconds is not None
-                else None
-            )
+        self.predictor.configure(**cfg)
 
     def handle(self, msg_type: int, payload: bytes) -> Optional[bytes]:
         """Process one frame, returning a reply frame or None."""
@@ -155,8 +144,13 @@ class BpmServer:
 
     # -- serving ----------------------------------------------------------
 
-    def serve(self, sock: socket.socket) -> None:
-        """Serve clients until interrupted."""
+    def serve(self, sock: socket.socket, once: bool = False) -> None:
+        """Serve clients until interrupted, or only the first one with ``once``.
+
+        A sidecar that TouchDesigner launches runs with ``once``: when that client's
+        connection closes - TouchDesigner stopped it, quit or crashed - there is no
+        one left to serve, and staying up would leave an orphan holding torch.
+        """
         while True:
             conn, _ = sock.accept()
             log.info("client connected")
@@ -172,6 +166,8 @@ class BpmServer:
                 except OSError:
                     pass
             log.info("client disconnected")
+            if once:
+                return
 
     def _serve_one(self, conn: socket.socket) -> None:
         conn.sendall(P.encode_json(P.MSG_READY, self._status()))
@@ -230,6 +226,11 @@ def main(argv=None) -> int:
                     help="0 accumulates evidence indefinitely")
     ap.add_argument("--lock-confidence", type=float, default=0.0)
     ap.add_argument("--smooth-alpha", type=float, default=0.90)
+    ap.add_argument("--range-min", type=float, default=0.0,
+                    help="lowest tempo the music can be; 0 for the model's range")
+    ap.add_argument("--range-max", type=float, default=0.0)
+    ap.add_argument("--once", action="store_true",
+                    help="exit when the first client disconnects")
     ap.add_argument("--announce", action="store_true",
                     help="print the socket path on stdout once listening")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -252,6 +253,8 @@ def main(argv=None) -> int:
         reset_seconds=args.reset_seconds,
         lock_confidence=args.lock_confidence,
         smooth_alpha=args.smooth_alpha,
+        range_min=args.range_min,
+        range_max=args.range_max,
     )
 
     if args.announce:
@@ -261,7 +264,7 @@ def main(argv=None) -> int:
         print(endpoint, flush=True)
 
     try:
-        server.serve(sock)
+        server.serve(sock, once=args.once)
     except KeyboardInterrupt:
         log.info("interrupted")
     except SystemExit:

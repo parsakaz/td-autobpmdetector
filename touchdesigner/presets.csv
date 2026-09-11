@@ -1,0 +1,30 @@
+# AutoBpm tempo presets - these are the choices under the PRESET button.
+#
+# Each line is one preset: a name, the lowest tempo and the highest tempo (in BPM).
+# Open this file in any text editor. Add, remove
+# or change lines, then save: the panel picks up the change straight away.
+# Lines starting with # are notes like this one and are ignored.
+#
+# Why presets help: the detector often hears music at half or double its real
+# speed - drum & bass as 87 instead of 174. Choosing a range tells it which one you
+# mean. A range narrower than an octave (170-180 rather than 90-180) works best.
+Name,Lowest BPM,Highest BPM
+Any,60,240
+Hip-Hop,85,100
+Reggaeton / Dembow,88,110
+Amapiano,108,116
+Disco / Nu-Disco,110,125
+Deep House,118,124
+House,120,128
+Tech House,124,128
+Techno,125,150
+Trance,132,142
+UK Garage,128,138
+Dubstep / Grime,138,142
+Psytrance,138,148
+Trap,130,150
+Hard Techno,140,160
+Hardstyle,145,155
+Jungle,160,175
+Drum & Bass,165,180
+Hardcore / Gabber,160,200

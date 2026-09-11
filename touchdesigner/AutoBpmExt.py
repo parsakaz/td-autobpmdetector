@@ -35,6 +35,115 @@ CHANNELS = ("bpm", "confidence", "beat", "phase")
 #: Marker that identifies a directory as the repository root.
 _MARKER = os.path.join("src", "tdautobpm", "engine.py")
 
+#: Taps further apart than this start a new tap sequence (i.e. below 30 BPM).
+TAP_TIMEOUT = 2.0
+
+#: How many recent taps the tapped tempo is averaged over.
+TAP_HISTORY = 8
+
+#: Taps closer together than this are one tap: a key held down auto-repeats, and a
+#: bouncing button can fire twice.
+TAP_DEBOUNCE = 0.1
+
+#: How far the Half and Double buttons can take the multiplier.
+MULTIPLIER_RANGE = (0.25, 4.0)
+
+
+def tap_tempo(times):
+    """Tempo and consistency from a sequence of tap times in seconds.
+
+    Returns ``(bpm, confidence)``, or None with fewer than two taps. The median interval
+    keeps one fumbled tap from dragging the tempo; the intervals near it are then
+    averaged for precision. Confidence is how evenly the taps were spaced, scaled down
+    until there are enough of them to mean anything.
+    """
+    intervals = [b - a for a, b in zip(times, times[1:]) if b > a]
+    if not intervals:
+        return None
+    median = sorted(intervals)[len(intervals) // 2]
+    near = [i for i in intervals if abs(i - median) <= 0.25 * median]
+    mean = sum(near) / len(near)
+    spread = (sum((i - mean) ** 2 for i in intervals) / len(intervals)) ** 0.5 / mean
+    confidence = max(0.0, 1.0 - 4.0 * spread) * min(1.0, len(intervals) / 3.0)
+    return 60.0 / mean, confidence
+
+
+#: What the panel offers when the presets file is missing or has nothing usable.
+FALLBACK_PRESETS = [("Any", 60.0, 240.0)]
+
+
+def read_presets(text):
+    """Parse the presets file into ``([(name, lowest, highest), ...], problems)``.
+
+    The file is meant to be edited by people who have never seen a CSV spec, in
+    whatever they have to hand, so this accepts what spreadsheet apps and text
+    editors actually save: commas, semicolons (Excel in much of Europe) or tabs;
+    decimal commas; a byte-order mark; a header row; blank lines and ``#`` notes;
+    and the two tempos in either order. Anything else is reported by line number
+    rather than silently dropped.
+    """
+    import csv
+
+    rows = [
+        (number, line)
+        for number, line in enumerate(text.lstrip("\ufeff").splitlines(), 1)
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    try:
+        dialect = csv.Sniffer().sniff("\n".join(l for _, l in rows[:10]), ",;\t")
+    except csv.Error:
+        dialect = csv.excel
+
+    presets, problems = [], []
+    for index, (number, line) in enumerate(rows):
+        cells = next(csv.reader([line], dialect))
+        if len(cells) < 3:  # a hand-typed line with a different separator
+            for delimiter in ";\t,":
+                split = next(csv.reader([line], delimiter=delimiter))
+                if len(split) >= 3:
+                    cells = split
+                    break
+        cells = [c.strip() for c in cells] + [""] * 3
+        name = cells[0]
+        try:
+            low, high = (float(c.replace(",", ".")) for c in cells[1:3])
+        except ValueError:
+            if index > 0:  # the first row may be a header
+                problems.append("line %d: expected a name and two tempos, got %r"
+                                % (number, line.strip()))
+            continue
+        low, high = min(low, high), max(low, high)
+        if not name:
+            problems.append("line %d: the preset has no name" % number)
+        elif low <= 0 or low == high:
+            problems.append("line %d: %s needs two different tempos above 0"
+                            % (number, name))
+        else:
+            presets.append((name, low, high))
+    return presets, problems
+
+
+class _Value:
+    """Stand-in for `tdu.Dependency` outside TouchDesigner: just holds `.val`."""
+
+    def __init__(self, val):
+        self.val = val
+
+
+def _dependency(val):
+    """A value that UI expressions can depend on.
+
+    `tdu.Dependency` makes an expression that reads `.val` re-evaluate when it
+    changes, which a plain attribute would not. Imported here rather than at module
+    scope so the module still loads without TouchDesigner.
+    """
+    try:
+        import tdu
+
+        return tdu.Dependency(val)
+    except ImportError:
+        return _Value(val)
+
 
 def find_repo(hint=None, owner=None):
     """Locate the td-autobpmdetector checkout.
@@ -120,13 +229,7 @@ class AutoBpm:
         self.repo = None
         self._E = None
         self._SidecarClient = None
-        try:
-            self.repo = find_repo(self._par("Repopath", ""), owner=ownerComp)
-            self._E, self._SidecarClient = load_support(self.repo)
-        except Exception as exc:
-            self.error = str(exc)
-            self.status = "error"
-            print("[AutoBpm] " + self.error)
+        self._resolve_repo()
 
         self.bpm = 0.0
         self.confidence = 0.0
@@ -140,6 +243,26 @@ class AutoBpm:
         self._seen = None
 
         self._sample_rate = 0
+
+        # Tap tempo. `_source` records where the current bpm came from, so a tapped
+        # tempo can be told apart from one held over from detection.
+        self._taps = []
+        self._tap_count = 0
+        self._force_beat = False
+        self._source = "auto"
+
+        # For the control panel: which state to show, and beats counted since the
+        # last Reset or tap, for the beat-in-bar display. Not CHOP channels, because
+        # neither is an output of the detector.
+        self.Mode = _dependency("stopped")
+        self.BeatCount = _dependency(0)
+
+        # Hold: below the confidence threshold, keep reporting the last tempo that
+        # was above it. `RawBpm` is the detector's latest estimate regardless, so the
+        # panel can show what it is hearing while the output holds.
+        self.RawBpm = _dependency(0.0)
+        self.holding = False
+        self._trusted = False  # whether there is a confident tempo to hold
 
     # -- parameters -------------------------------------------------------
 
@@ -155,7 +278,14 @@ class AutoBpm:
             smooth_alpha=float(self._par("Smoothing", 0.90)),
             reset_seconds=float(self._par("Resetseconds", 5.0)),
             lock_confidence=float(self._par("Lockconfidence", 0.0)),
+            range_min=float(self._par("Rangemin", 0.0)),
+            range_max=float(self._par("Rangemax", 0.0)),
         )
+
+    @property
+    def OutputBpm(self) -> float:
+        """The tempo this component outputs: the estimate times the multiplier."""
+        return self.bpm * float(self._par("Multiplier", 1.0) or 1.0)
 
     # -- lifecycle --------------------------------------------------------
 
@@ -223,9 +353,71 @@ class AutoBpm:
             self.detector = None
         self.status = "stopped"
 
+    def Configure(self):
+        """Send the current settings to a running detector without restarting it.
+
+        Everything but the runtime, environment and torch device applies live, so the
+        range can be dragged while the music plays and the evidence gathered so far
+        is kept.
+        """
+        if self.detector is not None:
+            self.detector.configure(**self._settings())
+        # A tempo held from before a range change may not fit the new range; let
+        # the next estimate through rather than holding it indefinitely.
+        low, high = self._par("Rangemin", 0.0), self._par("Rangemax", 0.0)
+        if self._trusted and low and high and not low <= self.bpm <= high:
+            self._trusted = False
+
+    def Half(self):
+        """Halve the output tempo, for when the detector counts double time."""
+        self._scale_multiplier(0.5)
+
+    def Double(self):
+        """Double the output tempo, for when the detector counts half time."""
+        self._scale_multiplier(2.0)
+
+    def _scale_multiplier(self, factor):
+        par = getattr(self.ownerComp.par, "Multiplier", None)
+        if par is not None:
+            low, high = MULTIPLIER_RANGE
+            par.val = min(high, max(low, par.eval() * factor))
+
+    def _resolve_repo(self):
+        """Find the checkout and load its helpers, then point the panel's presets."""
+        self.repo = None
+        self._E = None
+        self._SidecarClient = None
+        try:
+            self.repo = find_repo(self._par("Repopath", ""), owner=self.ownerComp)
+            self._E, self._SidecarClient = load_support(self.repo)
+        except Exception as exc:
+            self.error = str(exc)
+            self.status = "error"
+            print("[AutoBpm] " + self.error)
+        self.PointPresets()
+
+    @property
+    def PresetsPath(self) -> str:
+        """The Presets File parameter, else presets.csv in the checkout."""
+        path = (self._par("Presetsfile", "") or "").strip()
+        if path:
+            return os.path.abspath(os.path.expanduser(path))
+        if self.repo:
+            return os.path.join(self.repo, "touchdesigner", "presets.csv")
+        return ""
+
+    def PointPresets(self):
+        """Load the panel's preset menu from PresetsPath."""
+        dat = self.ownerComp.op("ui/presets_file")
+        if dat is not None and dat.par.file.eval() != self.PresetsPath:
+            dat.par.file = self.PresetsPath
+
     def Restart(self):
+        """Start over: find the checkout again, then a fresh detector."""
         self._retries = 0
         self._retry_at = 0.0
+        self.error = ""
+        self._resolve_repo()
         self.Start(self._sample_rate or 44100)
 
     def Reset(self):
@@ -233,8 +425,53 @@ class AutoBpm:
         self.bpm = 0.0
         self.confidence = 0.0
         self.phase = 0.0
+        self._taps = []
+        self._tap_count = 0
+        self._source = "auto"
+        self.BeatCount.val = 0
+        self.RawBpm.val = 0.0
+        self.holding = False
+        self._trusted = False
         if self.detector is not None:
             self.detector.reset()
+
+    def Tap(self):
+        """Tap tempo. Every tap puts the beat on the tap; two or more set the tempo.
+
+        A single tap only realigns the phase, which is also how to line `beat` up with
+        the music while detection runs: the model knows how fast, not where the beat
+        falls. Once taps give a tempo, detection is switched off (Active), so the
+        tapped tempo holds instead of being overwritten by the next estimate. Switch
+        Active back on to resume detection.
+        """
+        now = time.time()
+        if self._taps and now - self._taps[-1] < TAP_DEBOUNCE:
+            return
+        if self._taps and now - self._taps[-1] > TAP_TIMEOUT:
+            self._taps = []
+            self._tap_count = 0
+        self._taps = (self._taps + [now])[-TAP_HISTORY:]
+        self._tap_count += 1
+
+        self.phase = 0.0
+        self._last_cook = now
+        self._force_beat = True
+        self.BeatCount.val = self._tap_count - 1
+
+        estimate = tap_tempo(self._taps)
+        if estimate is not None:
+            self.bpm, self.confidence = estimate
+            self._source = "tap"
+            # A tapped tempo is one to hold: after START it stays until the detector
+            # is confident of its own.
+            self._trusted = True
+            self.holding = False
+            # What was tapped is the tempo wanted out, so no multiplier applies to it.
+            par = getattr(self.ownerComp.par, "Multiplier", None)
+            if par is not None and par.eval() != 1.0:
+                par.val = 1.0
+            if self._par("Active", False):
+                self.ownerComp.par.Active = False
 
     def _fail(self, message: str):
         self.error = message
@@ -270,8 +507,8 @@ class AutoBpm:
         # spawned to resample 60 Hz "audio".
         chans = source.chans() if source is not None else []
 
-        # Cook() and Diagnose() were disagreeing about the same input, so record what
-        # this callback actually sees rather than inferring it from the outcome.
+        # Record what this callback actually sees, for Diagnose(), rather than
+        # inferring it from the outcome.
         self._seen = {
             "n_inputs": len(scriptOp.inputs),
             "source": source.path if source is not None else None,
@@ -333,13 +570,32 @@ class AutoBpm:
 
         latest = self.detector.poll()
         if latest is not None:
-            self.bpm = latest["bpm"]
-            self.confidence = latest["confidence"]
+            self._take_estimate(latest["bpm"], latest["confidence"])
 
         err = self.detector.error()
         if err:
             self.error = err
             self.status = "error"
+
+    def _take_estimate(self, bpm, confidence):
+        """Accept a new estimate from the detector, or hold the last confident one.
+
+        With Hold on, an estimate below the confidence threshold does not replace one
+        that was above it: in a breakdown or a mix the detector loses the beat, and a
+        tempo drifting around is worse than the last one it was sure of. Until there
+        is a confident tempo there is nothing to hold, so estimates pass straight
+        through.
+        """
+        self.RawBpm.val = bpm
+        self.confidence = confidence
+        confident = confidence >= float(self._par("Autosyncconfidence", 0.0))
+        if confident or not self._par("Hold", False) or not self._trusted:
+            self.bpm = bpm
+            self._source = "auto"
+            self._trusted = self._trusted or confident
+            self.holding = False
+        else:
+            self.holding = True
 
     def _advance_phase(self, dt=None):
         """Free-running beat phase at the detected tempo.
@@ -352,15 +608,24 @@ class AutoBpm:
         `dt` comes from the audio time slice when there is input, which keeps the
         phase locked to the audio clock rather than jittering with frame times.
         """
+        # The clock is stamped on every cook, audio-timed or not. Otherwise the first
+        # wall-clock cook after a stretch on audio time - e.g. right after a tap
+        # switches detection off - would advance by that whole stretch at once.
+        now = time.time()
         if dt is None:
-            now = time.time()
             dt = 0.0 if self._last_cook is None else max(0.0, now - self._last_cook)
-            self._last_cook = now
+        self._last_cook = now
 
         prev = self.phase
-        if self.bpm > 0:
-            self.phase = (self.phase + dt * self.bpm / 60.0) % 1.0
-        self._beat = 1.0 if self.phase < prev else 0.0
+        bpm = self.OutputBpm
+        if bpm > 0:
+            self.phase = (self.phase + dt * bpm / 60.0) % 1.0
+        wrapped = self.phase < prev
+        if wrapped:
+            self.BeatCount.val += 1
+        # A tap puts the beat on the tap itself; it has already counted that beat.
+        self._beat = 1.0 if (wrapped or self._force_beat) else 0.0
+        self._force_beat = False
 
     def _write(self, scriptOp):
         """Fill the current time slice with the latest estimate.
@@ -376,7 +641,7 @@ class AutoBpm:
             scriptOp.appendChan(name)
 
         n = max(1, scriptOp.numSamples)
-        scriptOp["bpm"].vals = [self.bpm] * n
+        scriptOp["bpm"].vals = [self.OutputBpm] * n
         scriptOp["confidence"].vals = [self.confidence] * n
         scriptOp["phase"].vals = [self.phase] * n
 
@@ -400,14 +665,28 @@ class AutoBpm:
             # silent component is hard to debug.
             print("[AutoBpm] " + text)
 
+        mode = self._mode()
+        if mode != self.Mode.val:  # only on change, so dependents do not recook
+            self.Mode.val = mode
+
+    def _mode(self) -> str:
+        """What the panel should show: auto, hold, waiting, error, tap or stopped."""
+        if not self._par("Active", True):
+            return "tap" if self._source == "tap" and self.bpm > 0 else "stopped"
+        if self.error or self.status == "error":
+            return "error"
+        if self.status.startswith("waiting"):
+            return "waiting"
+        return "hold" if self.holding else "auto"
+
     def Tick(self):
         """Force the detector to run for this frame.
 
         Time Slice mode guarantees a CHOP *receives* a time slice when it cooks, but
-        it does not make it cook: a CHOP cooks only when something pulls on it. With
-        nothing connected downstream and no viewer open, the Script CHOP never ran at
-        all, so no audio ever reached the detector. An Execute DAT calls this from
-        onFrameStart so ingestion does not depend on anyone consuming the output.
+        it does not make it cook: a CHOP cooks only when something pulls on it, and
+        with nothing connected downstream and no viewer open, nothing does. An
+        Execute DAT calls this from onFrameStart, so audio reaches the detector
+        whether or not anyone consumes the output.
         """
         # Cook the *end* of the chain, not the middle. Forcing `detect` directly
         # cooks it without necessarily having pulled `audio_in` for this frame, which
@@ -449,7 +728,9 @@ class AutoBpm:
             print("[AutoBpm]             %s %s, missing=%s"
                   % (self.env.version, self.env.machine, self.env.missing or "nothing"))
         print("[AutoBpm] detector:   %r" % (self.detector,))
-        print("[AutoBpm] bpm:        %.2f  confidence %.3f" % (self.bpm, self.confidence))
+        print("[AutoBpm] bpm:        %.2f  confidence %.3f  (x%g)"
+              % (self.bpm, self.confidence, self._par("Multiplier", 1.0)))
+        print("[AutoBpm] range:      %s-%s" % (self._par("Rangemin"), self._par("Rangemax")))
         print("[AutoBpm] input rate: %s" % self._sample_rate)
 
         source = None
@@ -508,7 +789,7 @@ class AutoBpm:
         """Write the detected BPM to the project timeline tempo."""
         if self.bpm <= 0:
             return False
-        return set_project_tempo(self.bpm)
+        return set_project_tempo(self.OutputBpm)
 
     def OnAutosync(self):
         if self._par("Autosync", False) and self.bpm > 0:
@@ -566,6 +847,9 @@ class _SidecarDetector:
     def reset(self):
         self.client.reset()
 
+    def configure(self, **settings):
+        self.client.configure(**settings)
+
     def push(self, block):
         self.client.send_audio(block)
 
@@ -594,6 +878,7 @@ class _InProcessDetector:
         self._thread = None
         self._error = ""
         self._reset = threading.Event()
+        self._config = None  # settings waiting for the worker thread to apply
 
     def start(self):
         self._stop.clear()
@@ -608,6 +893,11 @@ class _InProcessDetector:
 
     def reset(self):
         self._reset.set()
+
+    def configure(self, **settings):
+        self.options.update(settings)
+        with self._lock:
+            self._config = dict(settings)
 
     def push(self, block):
         try:
@@ -645,6 +935,10 @@ class _InProcessDetector:
             if self._reset.is_set():
                 self._reset.clear()
                 predictor.reset()
+            with self._lock:
+                config, self._config = self._config, None
+            if config:
+                predictor.configure(**config)
             try:
                 block = self._in.get(timeout=0.1)
             except queue.Empty:

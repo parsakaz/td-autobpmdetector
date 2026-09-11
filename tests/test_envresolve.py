@@ -12,8 +12,8 @@ from tdautobpm import envresolve as E
 
 class TestExpand:
     def test_expands_tilde(self):
-        """A literal, unexpanded '~' once installed a whole miniconda into a
-        directory *named* '~'. Every user-supplied path goes through expand()."""
+        """A literal '~' would otherwise become a directory *named* '~'. Every
+        user-supplied path goes through expand()."""
         assert E.expand("~/envs/foo") == os.path.join(os.path.expanduser("~"), "envs/foo")
         assert "~" not in E.expand("~/envs/foo")
 

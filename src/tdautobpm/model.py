@@ -1,3 +1,10 @@
+"""TempoNet, the tempo model.
+
+The architecture and the trained weights (``models/temponet_ckpt.pt``) are by shhhum,
+from tdautobpmsync (https://github.com/shhhum/tdautobpmsync), and are used here
+unchanged apart from packaging. See the README's Credits section.
+"""
+
 import time
 from dataclasses import dataclass
 

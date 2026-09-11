@@ -150,7 +150,46 @@ class TestSidecar:
         client.reset()
         assert not client.last_error
 
+    def test_a_range_can_be_set_live(self, client):
+        """TouchDesigner drags the range; it must apply without a restart."""
+        client.configure(range_min=160, range_max=180)
+        x = click_track(174, duration=30.0)
+        for i in range(0, len(x), 2048):
+            client.send_audio(x[i : i + 2048])
+            client.poll()
+        results = _drain(client)
+        assert client.status["settings"]["range_min"] == 160
+        assert abs(results[-1]["bpm"] - 174) < 1.5
+        assert not client.last_error
+
+    def test_a_range_can_be_set_at_startup(self):
+        c = SidecarClient(sys.executable, sample_rate=44100, device="cpu",
+                          range_min=160, range_max=180, autorestart=False)
+        c.start()
+        try:
+            assert c.status["settings"]["range_max"] == 180
+        finally:
+            c.stop()
+
     def test_stop_terminates_the_child(self, client):
         assert client.alive
         client.stop()
         assert not client.alive
+
+
+def test_a_launched_sidecar_exits_with_its_client():
+    """If the host goes away without stopping it, the sidecar must not linger."""
+    import time
+
+    c = SidecarClient(sys.executable, sample_rate=44100, device="cpu", autorestart=False)
+    c.start()
+    try:
+        assert c.alive
+        c.sock.close()  # the host vanishing: no SHUTDOWN, just a closed connection
+        c.sock = None
+        deadline = time.time() + 10
+        while c.alive and time.time() < deadline:
+            time.sleep(0.1)
+        assert not c.alive
+    finally:
+        c.stop()

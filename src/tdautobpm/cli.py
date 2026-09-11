@@ -38,6 +38,8 @@ def cmd_analyze(args) -> int:
                 device=args.device,
                 accumulate=not args.streaming,
                 update_hz=args.update_hz,
+                range_min=args.range[0],
+                range_max=args.range[1],
             )
         except Exception as exc:
             failed += 1
@@ -93,6 +95,8 @@ def cmd_listen(args) -> int:
         estimate=args.estimate,
         reset_seconds=None if args.accumulate else args.reset_seconds,
         lock_confidence=args.lock_confidence,
+        range_min=args.range[0],
+        range_max=args.range[1],
     )
 
     q: "queue.Queue" = queue.Queue()
@@ -272,6 +276,21 @@ def cmd_doctor(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+RANGE_HELP = ("tempo range the music is in, e.g. 160-180 for drum and bass; the "
+              "estimate is folded into it by octaves, so 85 reports as 170")
+
+
+def _bpm_range(text: str):
+    """Parse ``LO-HI`` into a pair of floats."""
+    try:
+        lo, hi = (float(part) for part in text.split("-"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected LO-HI, e.g. 160-180, not {text!r}")
+    if not 0 < lo < hi:
+        raise argparse.ArgumentTypeError(f"need 0 < LO < HI, got {text!r}")
+    return lo, hi
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tdautobpm", description=__doc__)
     ap.add_argument("--version", action="version", version=f"tdautobpm {__version__}")
@@ -286,6 +305,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--update-hz", type=float, default=4.0)
     p.add_argument("--streaming", action="store_true",
                    help="reset the posterior periodically, as live detection does")
+    p.add_argument("--range", type=_bpm_range, default=(0.0, 0.0), metavar="LO-HI",
+                   help=RANGE_HELP)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_analyze)
 
@@ -305,6 +326,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="never reset the posterior")
     p.add_argument("--lock-confidence", type=float, default=0.0)
     p.add_argument("--min-confidence", type=float, default=0.0)
+    p.add_argument("--range", type=_bpm_range, default=(0.0, 0.0), metavar="LO-HI",
+                   help=RANGE_HELP)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_listen)
 

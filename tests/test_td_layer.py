@@ -4,8 +4,8 @@ The component itself cannot be built outside TD, but the parts that go wrong sil
 can be tested here: locating the checkout, and keeping the module importable by an
 interpreter that has no torch.
 
-Both `AutoBpmExt.py` and `build_component.py` once relied on `__file__`, which is wrong
-in opposite ways. `build_component.py` is run via `exec(open(p).read())`, where
+Neither `AutoBpmExt.py` nor `build_component.py` can rely on `__file__`, which is wrong
+for them in opposite ways. `build_component.py` is run via `exec(open(p).read())`, where
 `__file__` is whatever the calling namespace had - in TouchDesigner's textport, a path
 inside the application bundle. `AutoBpmExt.py` is stored as a Text DAT *inside* the
 .tox and has no file on disk at all. So neither may trust it.
@@ -105,6 +105,106 @@ class TestExtensionModule:
         assert envresolve.__name__ == "tdautobpm.envresolve"
         assert client_cls.__name__ == "SidecarClient"
 
+    @pytest.mark.parametrize("filename", ["AutoBpmExt.py", "build_component.py"])
+    def test_files_are_ascii(self, filename):
+        """TouchDesigner's `open()` decodes as ASCII, so the documented
+        `exec(open(p).read())` fails on the first non-ASCII character."""
+        with open(os.path.join(TD_DIR, filename), "rb") as f:
+            f.read().decode("ascii")
+
+
+class _Par:
+    def __init__(self, val):
+        self.val = val
+
+    def eval(self):
+        return self.val
+
+
+class _Pars:
+    """Parameters the way TD exposes them: assigning a value keeps a Par."""
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value if isinstance(value, _Par) else _Par(value))
+
+
+class _Comp:
+    def __init__(self, **values):
+        self.par = _Pars()
+        for name, value in values.items():
+            setattr(self.par, name, value)
+
+    def op(self, name):
+        return None
+
+
+class TestTapTempo:
+    def test_needs_two_taps(self, ext):
+        assert ext["tap_tempo"]([]) is None
+        assert ext["tap_tempo"]([3.0]) is None
+
+    def test_steady_taps(self, ext):
+        bpm, confidence = ext["tap_tempo"]([0.0, 0.5, 1.0, 1.5])
+        assert bpm == pytest.approx(120.0)
+        assert confidence == pytest.approx(1.0)
+
+    def test_two_taps_give_a_tempo_but_little_confidence(self, ext):
+        bpm, confidence = ext["tap_tempo"]([0.0, 0.5])
+        assert bpm == pytest.approx(120.0)
+        assert confidence < 0.5
+
+    def test_a_missed_tap_does_not_drag_the_tempo(self, ext):
+        """A plain mean of these intervals would say 96 BPM."""
+        bpm, confidence = ext["tap_tempo"]([0.0, 0.5, 1.0, 2.0, 2.5])
+        assert bpm == pytest.approx(120.0)
+        assert confidence < 1.0
+
+    def _tap(self, ext, monkeypatch, comp, times):
+        bpm = ext["AutoBpm"](comp)
+        clock = iter(times)
+        monkeypatch.setattr(ext["time"], "time", lambda: next(clock))
+        for _ in times:
+            bpm.Tap()
+        return bpm
+
+    def test_taps_set_the_tempo_and_stop_detection(self, ext, monkeypatch):
+        comp = _Comp(Active=True, Repopath=REPO)
+        bpm = self._tap(ext, monkeypatch, comp, [10.0, 10.5, 11.0, 11.5])
+        assert bpm.bpm == pytest.approx(120.0)
+        assert comp.par.Active.eval() is False  # so the next estimate cannot win
+        assert bpm._mode() == "tap"
+        assert bpm.BeatCount.val == 3  # the fourth tap is beat four
+
+    def test_one_tap_only_realigns_the_phase(self, ext, monkeypatch):
+        comp = _Comp(Active=True, Repopath=REPO)
+        bpm = ext["AutoBpm"](comp)
+        bpm.bpm, bpm.phase = 128.0, 0.6
+        monkeypatch.setattr(ext["time"], "time", lambda: 5.0)
+        bpm.Tap()
+        assert bpm.phase == 0.0
+        assert bpm.bpm == 128.0
+        assert comp.par.Active.eval() is True
+
+    def test_a_held_key_does_not_tap_again(self, ext, monkeypatch):
+        """Auto-repeat from holding space arrives far faster than anyone taps."""
+        comp = _Comp(Active=False, Repopath=REPO)
+        bpm = self._tap(ext, monkeypatch, comp, [0.0, 0.03, 0.06, 0.5])
+        assert len(bpm._taps) == 2
+        assert bpm.bpm == pytest.approx(120.0)
+
+    def test_tapping_clears_the_multiplier(self, ext, monkeypatch):
+        """What was tapped is the tempo wanted out."""
+        comp = _Comp(Active=True, Repopath=REPO, Multiplier=2.0)
+        bpm = self._tap(ext, monkeypatch, comp, [0.0, 0.5, 1.0])
+        assert comp.par.Multiplier.eval() == 1.0
+        assert bpm.OutputBpm == pytest.approx(120.0)
+
+    def test_a_pause_starts_a_new_tap_sequence(self, ext, monkeypatch):
+        comp = _Comp(Active=False, Repopath=REPO)
+        bpm = self._tap(ext, monkeypatch, comp, [0.0, 1.0, 1.5 + 10.0, 2.0 + 10.0])
+        assert bpm.bpm == pytest.approx(120.0)  # not dragged by the 60 BPM pair
+        assert bpm.BeatCount.val == 1
+
 
 class TestBuildScript:
     """`build_component.py` resolves its own location at import time."""
@@ -165,3 +265,152 @@ class TestBuildScript:
                      "parameterexecuteDAT"):
             assert f"create({name}," not in source, f"bare {name} used"
             assert f'_td("{name}")' in source
+
+
+class TestMultiplier:
+    def test_output_is_the_estimate_times_the_multiplier(self, ext):
+        comp = _Comp(Active=True, Repopath=REPO, Multiplier=2.0)
+        bpm = ext["AutoBpm"](comp)
+        bpm.bpm = 87.0
+        assert bpm.OutputBpm == pytest.approx(174.0)
+
+    def test_half_and_double_step_by_octaves_within_bounds(self, ext):
+        comp = _Comp(Active=True, Repopath=REPO, Multiplier=1.0)
+        bpm = ext["AutoBpm"](comp)
+        seen = []
+        for step in ("Double", "Double", "Double", "Half", "Half", "Half", "Half",
+                     "Half"):
+            getattr(bpm, step)()
+            seen.append(comp.par.Multiplier.eval())
+        assert seen == [2.0, 4.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.25]
+
+    def test_phase_runs_at_the_output_tempo(self, ext):
+        comp = _Comp(Active=True, Repopath=REPO, Multiplier=2.0)
+        bpm = ext["AutoBpm"](comp)
+        bpm.bpm = 60.0  # one beat a second, two with the multiplier
+        bpm._advance_phase(0.25)
+        assert bpm.phase == pytest.approx(0.5)
+
+
+class TestConfigure:
+    def test_range_is_part_of_the_settings(self, ext):
+        comp = _Comp(Active=True, Repopath=REPO, Rangemin=160.0, Rangemax=180.0)
+        settings = ext["AutoBpm"](comp)._settings()
+        assert (settings["range_min"], settings["range_max"]) == (160.0, 180.0)
+
+    def test_forwards_settings_to_a_running_detector(self, ext):
+        comp = _Comp(Active=True, Repopath=REPO, Rangemin=160.0, Rangemax=180.0)
+        bpm = ext["AutoBpm"](comp)
+        received = {}
+
+        class Detector:
+            def configure(self, **settings):
+                received.update(settings)
+
+        bpm.detector = Detector()
+        bpm.Configure()
+        assert received["range_min"] == 160.0
+
+    def test_does_nothing_without_a_detector(self, ext):
+        ext["AutoBpm"](_Comp(Active=True, Repopath=REPO)).Configure()
+
+
+class TestPresets:
+    """presets.csv is edited by hand, in whatever spreadsheet app is to hand."""
+
+    def test_the_shipped_file_is_clean(self, ext):
+        with open(os.path.join(TD_DIR, "presets.csv"), encoding="utf-8") as f:
+            presets, problems = ext["read_presets"](f.read())
+        assert problems == []
+        assert presets[0] == ("Any", 60.0, 240.0)
+        assert ("Drum & Bass", 165.0, 180.0) in presets
+
+    def test_notes_header_and_blank_lines_are_skipped(self, ext):
+        text = "# a note, with commas\n\nName,Lowest BPM,Highest BPM\nHouse,120,128\n"
+        assert ext["read_presets"](text) == ([("House", 120.0, 128.0)], [])
+
+    def test_excel_in_europe_semicolons_and_decimal_commas(self, ext):
+        text = "\ufeffName;Lowest BPM;Highest BPM\nDrum & Bass;165;180\nOdd;99,5;101\n"
+        presets, problems = ext["read_presets"](text)
+        assert presets == [("Drum & Bass", 165.0, 180.0), ("Odd", 99.5, 101.0)]
+        assert problems == []
+
+    def test_tabs_quotes_and_reversed_tempos(self, ext):
+        text = 'Name\tLow\tHigh\n"Reggaeton, Dembow"\t102\t88\n'
+        assert ext["read_presets"](text)[0] == [("Reggaeton, Dembow", 88.0, 102.0)]
+
+    def test_a_line_typed_with_another_separator_still_counts(self, ext):
+        text = "Name,Low,High\nHouse,120,128\nTypo;100;110\n"
+        presets, problems = ext["read_presets"](text)
+        assert ("Typo", 100.0, 110.0) in presets
+        assert problems == []
+
+    def test_bad_lines_are_reported_by_number_not_dropped_silently(self, ext):
+        text = "Name,Low,High\nHouse,120,128\nBroken,fast,faster\n,100,110\nFlat,120,120\n"
+        presets, problems = ext["read_presets"](text)
+        assert presets == [("House", 120.0, 128.0)]
+        assert [p.split(":")[0] for p in problems] == ["line 3", "line 4", "line 5"]
+
+    def test_an_empty_file_has_no_presets(self, ext):
+        assert ext["read_presets"]("") == ([], [])
+
+
+class TestHold:
+    def _comp(self, **values):
+        values.setdefault("Active", True)
+        values.setdefault("Repopath", REPO)
+        values.setdefault("Autosyncconfidence", 0.5)
+        values.setdefault("Hold", True)
+        return _Comp(**values)
+
+    def test_a_doubtful_estimate_does_not_replace_a_confident_one(self, ext):
+        bpm = ext["AutoBpm"](self._comp())
+        bpm._take_estimate(174.0, 0.8)
+        bpm._take_estimate(131.0, 0.1)  # the breakdown
+        assert bpm.bpm == 174.0
+        assert bpm.RawBpm.val == 131.0  # the panel still shows what it hears
+        assert bpm.confidence == 0.1
+        assert bpm._mode() == "hold"
+        bpm._take_estimate(175.0, 0.7)  # the drop
+        assert bpm.bpm == 175.0
+        assert bpm._mode() == "auto"
+
+    def test_passes_through_until_there_is_something_to_hold(self, ext):
+        bpm = ext["AutoBpm"](self._comp())
+        bpm._take_estimate(120.0, 0.1)
+        bpm._take_estimate(122.0, 0.2)
+        assert bpm.bpm == 122.0
+        assert bpm._mode() == "auto"
+
+    def test_off_follows_every_estimate(self, ext):
+        bpm = ext["AutoBpm"](self._comp(Hold=False))
+        bpm._take_estimate(174.0, 0.8)
+        bpm._take_estimate(131.0, 0.1)
+        assert bpm.bpm == 131.0
+
+    def test_reset_forgets_the_held_tempo(self, ext):
+        bpm = ext["AutoBpm"](self._comp())
+        bpm._take_estimate(174.0, 0.8)
+        bpm.Reset()
+        bpm._take_estimate(131.0, 0.1)
+        assert bpm.bpm == 131.0
+
+    def test_a_range_that_excludes_the_held_tempo_releases_it(self, ext):
+        comp = self._comp(Rangemin=60.0, Rangemax=240.0)
+        bpm = ext["AutoBpm"](comp)
+        bpm._take_estimate(174.0, 0.8)
+        comp.par.Rangemin, comp.par.Rangemax = 120.0, 135.0
+        bpm.Configure()
+        bpm._take_estimate(128.0, 0.2)
+        assert bpm.bpm == 128.0
+
+    def test_a_tapped_tempo_holds_until_detection_is_sure(self, ext, monkeypatch):
+        comp = self._comp()
+        bpm = ext["AutoBpm"](comp)
+        clock = iter([0.0, 0.5, 1.0])
+        monkeypatch.setattr(ext["time"], "time", lambda: next(clock))
+        for _ in range(3):
+            bpm.Tap()
+        comp.par.Active = True  # START
+        bpm._take_estimate(90.0, 0.2)
+        assert bpm.bpm == pytest.approx(120.0)

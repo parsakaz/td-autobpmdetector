@@ -137,9 +137,9 @@ class EnvInfo:
 def expand(path: str) -> str:
     """Expand ``~`` and ``$VARS`` in a user-supplied path.
 
-    Not optional politeness: a literal, unexpanded ``~`` in the upstream setup flow
-    installed an entire miniconda into a directory *named* ``~``. Every path that
-    reaches this module from a parameter field or env var goes through here first.
+    A literal, unexpanded ``~`` is a real directory name to the filesystem, and an
+    installer given one creates a folder called ``~``. Every path that reaches this
+    module from a parameter field or env var goes through here first.
     """
     return os.path.abspath(os.path.expanduser(os.path.expandvars(str(path).strip())))
 
