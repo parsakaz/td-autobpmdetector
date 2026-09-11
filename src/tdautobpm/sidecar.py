@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import socket
+import stat
 import sys
 import time
 from typing import Optional
@@ -83,8 +84,13 @@ class BpmServer:
     # -- message handling -------------------------------------------------
 
     def reconfigure(self, cfg: dict) -> None:
-        """Apply a config message, rebuilding the model only when it must be."""
-        rebuild_keys = {"checkpoint", "device", "sample_rate"}
+        """Apply a config message, rebuilding the model only when it must be.
+
+        The checkpoint is fixed at startup: which file gets loaded is not something
+        a connected client may choose.
+        """
+        cfg = {k: v for k, v in cfg.items() if k != "checkpoint"}
+        rebuild_keys = {"device", "sample_rate"}
         needs_rebuild = any(
             k in cfg and cfg[k] != self.settings.get(k) for k in rebuild_keys
         )
@@ -197,11 +203,21 @@ def bind(socket_path: Optional[str] = None, port: Optional[int] = None) -> socke
         return sock
 
     path = os.path.expanduser(socket_path or default_socket_path())
-    if os.path.exists(path):
+    # Replace a stale socket, but never delete anything else that happens to be at
+    # the path.
+    if os.path.lexists(path):
+        if not stat.S_ISSOCK(os.lstat(path).st_mode):
+            raise FileExistsError(f"{path} exists and is not a socket")
         os.unlink(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(path)
+    # Owner-only from the moment it exists: the protocol has no authentication,
+    # so only this user may connect.
+    previous = os.umask(0o077)
+    try:
+        sock.bind(path)
+    finally:
+        os.umask(previous)
     sock.listen(1)
     log.info("listening on %s", path)
     return sock
@@ -215,7 +231,8 @@ def default_socket_path() -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="tdautobpm.sidecar", description=__doc__)
     ap.add_argument("--socket", help="unix socket path")
-    ap.add_argument("--port", type=int, help="listen on TCP loopback instead")
+    ap.add_argument("--port", type=int,
+                    help="listen on TCP loopback instead; any local user can connect")
     ap.add_argument("--checkpoint")
     ap.add_argument("--device", default="cpu", choices=["cpu", "mps", "cuda"])
     ap.add_argument("--sample-rate", type=int, default=44100)

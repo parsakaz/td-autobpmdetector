@@ -193,3 +193,40 @@ def test_a_launched_sidecar_exits_with_its_client():
         assert not c.alive
     finally:
         c.stop()
+
+
+class TestHardening:
+    def test_the_socket_is_owner_only(self):
+        import os
+        import shutil
+        import stat
+        import tempfile
+
+        from tdautobpm.sidecar import bind
+
+        # Short, because macOS caps socket paths at 104 bytes.
+        folder = tempfile.mkdtemp(dir="/tmp")
+        path = os.path.join(folder, "s.sock")
+        sock = bind(path)
+        try:
+            assert stat.S_IMODE(os.stat(path).st_mode) & 0o077 == 0
+        finally:
+            sock.close()
+            shutil.rmtree(folder)
+
+    def test_bind_will_not_delete_a_file_that_is_not_a_socket(self, tmp_path):
+        from tdautobpm.sidecar import bind
+
+        victim = tmp_path / "important.txt"
+        victim.write_text("keep me")
+        with pytest.raises(FileExistsError):
+            bind(str(victim))
+        assert victim.read_text() == "keep me"
+
+    def test_a_client_cannot_choose_the_checkpoint(self, client, tmp_path):
+        """Loading a file of the client's choosing would let it run code."""
+        before = client.status["settings"]["checkpoint"]
+        client.configure(checkpoint=str(tmp_path / "evil.pt"))
+        _drain(client)
+        assert client.status["settings"]["checkpoint"] == before
+        assert not client.last_error

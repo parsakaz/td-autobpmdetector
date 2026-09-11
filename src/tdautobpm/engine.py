@@ -206,7 +206,9 @@ class TempoStreamPredictorAccum:
             lock_confidence: once the posterior mode reaches this confidence, stop
                 resetting and keep accumulating. ``0`` disables latching.
         """
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        # weights_only: a checkpoint is data, and must not be able to run code the
+        # way an arbitrary pickle can (the default before torch 2.6).
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         cfg = AudioConfig(**ckpt["cfg"])
         self.cfg = cfg
         self.device = device
