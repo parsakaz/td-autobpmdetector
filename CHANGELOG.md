@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.1 - 2026-09-11
+
+Security hardening of the detector process. All of these need someone already able to
+run code on the same machine.
+
+- The model checkpoint is loaded as data only, so a checkpoint file cannot execute
+  code.
+- A connected client can no longer choose which checkpoint the detector loads.
+- The detector's Unix socket is owner-only, so other users on the machine cannot
+  connect to it; `serve --port` notes that TCP has no such protection.
+- Starting the detector replaces a stale socket but never deletes any other file.
+
 ## v0.1.0 - 2026-09-11
 
 First release.

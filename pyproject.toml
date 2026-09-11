@@ -1,6 +1,6 @@
 [project]
 name = "tdautobpm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Real-time BPM detection for TouchDesigner, with a control panel, tap tempo and genre-aware tempo ranges"
 readme = "README.md"
 requires-python = ">=3.9"
