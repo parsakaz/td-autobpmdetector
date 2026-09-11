@@ -20,6 +20,12 @@ have and cannot crash TouchDesigner.
 - **Autosync** of TouchDesigner's timeline tempo, gated on confidence
 - A **command line** for analysing files and live inputs outside TouchDesigner
 
+## Demo
+
+[![Demo video: AutoBPM for TouchDesigner](https://img.youtube.com/vi/KuaTeZwz58E/maxresdefault.jpg)](https://youtu.be/KuaTeZwz58E)
+
+Watch it [on YouTube](https://youtu.be/KuaTeZwz58E).
+
 ## Requirements
 
 - TouchDesigner 2025 (built and tested on 2025.30060; earlier versions are untested)
