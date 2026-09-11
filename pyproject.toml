@@ -1,17 +1,21 @@
 [project]
 name = "tdautobpm"
 version = "0.1.0"
-description = "Real-time BPM detection for TouchDesigner, powered by a causal TCN (TempoNet)"
+description = "Real-time BPM detection for TouchDesigner, with a control panel, tap tempo and genre-aware tempo ranges"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
 authors = [{ name = "parsakaz" }]
-# Upstream model and weights by shhhum (https://github.com/shhhum/tdautobpmsync) - see NOTICE.
+keywords = ["touchdesigner", "bpm", "tempo", "beat", "audio", "vj"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Artistic Software",
+]
+# The TempoNet model and weights are shhhum's (https://github.com/shhhum/tdautobpmsync)
+# and are not covered by this project's licence; see the README's Credits.
 
-# Deliberately minimal. The upstream requirements.txt was a 35-line `pip freeze` in which
-# ~20 packages (librosa, numba, llvmlite, scikit-learn, scipy, pooch, audioread, soxr,
-# joblib, msgpack, ...) are never imported by the model or inference code, and which pinned
-# `pip` and `setuptools` themselves - fighting the installer mid-install. That is what made
-# environment creation fail. These 4 are what the engine actually imports.
+# The four packages the engine actually imports, and nothing else.
 dependencies = [
     "torch>=2.2,<3",
     "torchaudio>=2.2,<3",
@@ -24,6 +28,10 @@ dependencies = [
 # TouchDesigner, which supplies its own audio.
 live = ["sounddevice>=0.4.6"]
 dev = ["pytest>=7.4"]
+
+[project.urls]
+Homepage = "https://github.com/parsakaz/td-autobpmdetector"
+Issues = "https://github.com/parsakaz/td-autobpmdetector/issues"
 
 [project.scripts]
 tdautobpm = "tdautobpm.cli:main"

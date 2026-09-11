@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it, and the TempoNet model it runs, as below."
+title: "td-autobpmdetector: real-time BPM detection for TouchDesigner"
+version: 0.1.0
+date-released: 2026-09-11
+license: MIT
+repository-code: "https://github.com/parsakaz/td-autobpmdetector"
+authors:
+  - alias: parsakaz
+references:
+  - type: software
+    title: "tdautobpmsync: Automatic BPM detection and synchronization for TouchDesigner"
+    notes: "Source of the TempoNet model architecture and trained weights used here."
+    authors:
+      - alias: shhhum
+    repository-code: "https://github.com/shhhum/tdautobpmsync"
+    year: 2026
