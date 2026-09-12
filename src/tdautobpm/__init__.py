@@ -5,6 +5,6 @@ they are not pulled in here. :mod:`tdautobpm.envresolve` is stdlib-only and safe
 import from inside TouchDesigner before any environment has been set up.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]

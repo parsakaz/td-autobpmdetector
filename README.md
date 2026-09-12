@@ -18,6 +18,7 @@ have and cannot crash TouchDesigner.
 - **Tap tempo** with the button, the space bar or MIDI, which also sets where the beat falls
 - **÷2 / ×2** for when the detector counts half or double time
 - **Autosync** of TouchDesigner's timeline tempo, gated on confidence
+- **Sets itself up**: the .tox builds its own Python environment, no terminal needed
 - A **command line** for analysing files and live inputs outside TouchDesigner
 
 ## Demo
@@ -29,49 +30,66 @@ Watch it [on YouTube](https://youtu.be/KuaTeZwz58E).
 ## Requirements
 
 - TouchDesigner 2025 (built and tested on 2025.30060; earlier versions are untested)
-- Python 3.9 or later with `torch`, `torchaudio`, `numpy` and `soundfile`; any venv or
-  conda environment will do (see [Python environments](#python-environments))
 - macOS or Linux. Tested on macOS on Apple Silicon. Windows is not supported yet: the
-  default runtime talks to its detector process over a Unix socket.
+  detector runs as a separate process reached over a Unix socket.
+- About 1 GB of disk for the Python environment it installs, and an internet
+  connection the first time. No Python of your own is needed: it can build one on
+  TouchDesigner's.
 
 ## Installation
 
-**1. Get the code and a Python environment.** With [uv](https://docs.astral.sh/uv/):
+Download **`AutoBpm.tox`** from the
+[latest release](https://github.com/parsakaz/td-autobpmdetector/releases/latest) and
+drag it into your TouchDesigner project. Then:
+
+1. Wire an **Audio Device In** CHOP (or any audio CHOP) into its input.
+2. Open the component's viewer to see the control panel. To click on it, make the
+   viewer active with the button at the node's bottom-right corner, or open the
+   component in its own window (right-click, then **View...**).
+3. If it says **SET UP**, press **INSTALL PYTHON ENVIRONMENT** and wait. The status
+   line reports progress; it downloads a few hundred megabytes of PyTorch, so give it
+   a few minutes on a first run.
+
+![Before setup](demo/control_panel_setup.png)
+
+That is all. The component detects the tempo as soon as the environment is ready, and
+every project on the machine shares that one environment.
+
+### What setup does
+
+It builds a Python environment and installs this project's wheel into it, which
+carries the detector and the model. It uses the first of these it finds:
+
+- a Python 3.12, 3.11, 3.13 or 3.10 already on the machine, which keeps the detector
+  in its own process, where a crash cannot take TouchDesigner down;
+- otherwise TouchDesigner's own Python, which always exists. On macOS such an
+  environment can only be used from inside TouchDesigner, so the component switches
+  `Runtime` to in-process by itself.
+
+The environment goes in `~/Library/Application Support/tdautobpm/env`
+(`~/.local/share/tdautobpm/env` on Linux). Set **Environment Folder** on the *Setup*
+page to put it elsewhere, **Base Python** to choose the interpreter, or **Package** to
+install from a different wheel. The whole transcript is in the component's
+`setup_log` DAT. Deleting the folder and pressing the button again is a clean retry.
+
+If you already have a Python with `torch`, `torchaudio`, `numpy` and `soundfile`, skip
+all of this and put it in **Python Env** instead.
+
+### From source
+
+For development, or to change the component itself:
 
 ```bash
 git clone https://github.com/parsakaz/td-autobpmdetector
 cd td-autobpmdetector
 uv venv --python 3.11
-uv pip install -e '.[live]'
-```
-
-Or with plain pip:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[live]'
-```
-
-Check that it works:
-
-```bash
+uv pip install -e '.[live,dev]'
 uv run tdautobpm doctor                        # which environments can run it
 uv run tdautobpm analyze test_tracks/yuqt.mp3  # tempo of a file
 ```
 
-**2. Add the component to your TouchDesigner project.** Drag
-`touchdesigner/AutoBpm.tox` into your network. Then:
-
-1. Set **Repo Path** (on the component's *Auto BPM* page) to the folder you cloned. It
-   can stay blank if your `.toe` is saved inside that folder.
-2. Wire an **Audio Device In** CHOP (or any audio CHOP) into the component's input.
-3. The control panel shows in the component's node viewer. To click on it, make the
-   viewer active with the button at the node's bottom-right corner, or open the
-   component in its own window (right-click, then **View...**).
-
-It starts the detector by itself. After a few seconds of music the BPM appears.
-
-To rebuild the component from source instead, run this in the textport:
+Then set the component's **Repo Path** to the clone, so it uses your working copy
+rather than an installed wheel, or rebuild the component from the textport:
 
 ```python
 p = "/path/to/td-autobpmdetector/touchdesigner/build_component.py"
@@ -101,7 +119,7 @@ follows the detector whenever confidence is above the threshold.
 
 | Control | What it does |
 | --- | --- |
-| **Readout** | the tempo, coloured by mode: AUTO (orange), HOLD (yellow), TAP (blue), STOPPED (grey); also NO INPUT and ERROR |
+| **Readout** | the tempo, coloured by mode: AUTO (orange), HOLD (yellow), TAP (blue), STOPPED (grey); also SET UP, SETTING UP, NO INPUT and ERROR |
 | **Confidence** | red → amber → green. Drag the **knob** to set the confidence threshold used by Hold and Autosync |
 | **Beat ring** | the arc is the phase, the centre pulses on each beat, the dots count beats in the bar |
 | **Detection range** | drag the handles, or pick a genre under **PRESET**. The white mark is what the detector currently hears |
@@ -126,8 +144,10 @@ Music that doesn't fit the range shows confidence near zero, so Hold and Autosyn
 ignore it. The range only corrects factors of two. A tempo heard at 3:2 (110 as 165,
 say) is a different kind of mistake, which the low confidence at least reveals.
 
-The **PRESET** menu is read from [`touchdesigner/presets.csv`](touchdesigner/presets.csv),
-a plain list you can edit:
+The **PRESET** menu comes from a plain list that travels inside the component, so it
+works with nothing but the .tox. With a checkout it is read from
+[`touchdesigner/presets.csv`](touchdesigner/presets.csv) instead, and **Presets File**
+points it at any file you like:
 
 ```
 Name,Lowest BPM,Highest BPM
@@ -187,6 +207,16 @@ Tap along with the TAP button, the space bar or the **Tap Tempo** pulse.
 | Presets File | blank | blank uses `touchdesigner/presets.csv` |
 | Status | | what the component is doing, or why it isn't |
 
+On the *Setup* page:
+
+| Parameter | Default | |
+| --- | --- | --- |
+| Environment Folder | blank | where to build; blank is the shared per-user folder |
+| Package | this version's wheel | what to install; takes pip arguments too |
+| Base Python | blank | which interpreter to build on; blank picks the best found |
+| Create Environment | | pulse, the same as the panel's install button |
+| Cancel Setup | | pulse: stop a running setup |
+
 Changing the detector's settings or the range takes effect immediately, without
 restarting it or losing what it has heard.
 
@@ -202,7 +232,13 @@ It prints the environment in use, what is arriving on the input and how loud it 
 and the detector's state.
 
 - **NO INPUT**: nothing audio-rate is wired in. Connect an Audio Device In CHOP.
-- **ERROR: could not find the td-autobpmdetector checkout**: set Repo Path.
+- **SET UP**: there is no environment yet. Press the install button, or point
+  **Python Env** at one you already have.
+- **setup failed**: read the `setup_log` DAT inside the component. Usually no network,
+  no disk space, or no Python to build on, in which case install Python 3.12 from
+  python.org and press it again.
+- **ERROR: could not find the td-autobpmdetector checkout**: only happens with Repo
+  Path set to something that is not a checkout. Clear it.
 - **ERROR about the environment**: run `tdautobpm doctor` and point Python Env at an
   environment it marks `sidecar: yes`.
 - **The tempo is double or half**: set a detection range, or press ÷2 / ×2.

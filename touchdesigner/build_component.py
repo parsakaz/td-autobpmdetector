@@ -102,6 +102,12 @@ def _set_par(owner, candidates, value, required=True):
     return None
 
 
+def _read(path):
+    """Read a file the component carries a copy of. ASCII, like everything TD reads."""
+    with open(path) as f:
+        return f.read()
+
+
 def _locate_here():
     """Find the directory holding this script and AutoBpmExt.py.
 
@@ -143,6 +149,30 @@ def _locate_here():
 HERE = _locate_here()
 REPO = os.path.dirname(HERE)
 
+def _package_url(version):
+    """The wheel URL for a version, from the same helper the component uses.
+
+    Loaded from the file rather than imported, because the build runs in
+    TouchDesigner's interpreter, where the package is not installed.
+    """
+    path = os.path.join(REPO, "src", "tdautobpm", "envsetup.py")
+    namespace = {"__name__": "envsetup"}
+    exec(compile(_read(path), path, "exec"), namespace)
+    return namespace["package_url"](version)
+
+
+def _version():
+    """The package version, which is also the release whose wheel the setup installs."""
+    text = _read(os.path.join(REPO, "src", "tdautobpm", "__init__.py"))
+    for line in text.splitlines():
+        if line.startswith("__version__"):
+            return line.split("=", 1)[1].strip().strip('"\'')
+    raise RuntimeError("no __version__ in src/tdautobpm/__init__.py")
+
+
+#: Stdlib-only modules embedded in the component; see AutoBpmExt.load_embedded.
+SUPPORT_MODULES = ("protocol", "client", "envresolve", "envsetup")
+
 COMP_NAME = "AutoBpm"
 TOX_PATH = os.path.join(HERE, "AutoBpm.tox")
 
@@ -178,6 +208,16 @@ def build(parent_path="/", save_to=None):
     comp.nodeX, comp.nodeY = 0, 0
     # The panel reaches the component as `parent.AutoBpm`, whatever it is renamed to.
     comp.par.parentshortcut = "AutoBpm"
+
+    # -- embedded support --------------------------------------------------
+    # The TouchDesigner side of tdautobpm, carried inside the component so that a
+    # .tox on its own works: no checkout needed for anything but development.
+    lib = comp.create(_td("baseCOMP"), "lib")
+    lib.nodeX, lib.nodeY = -700, 200
+    for index, name in enumerate(SUPPORT_MODULES):
+        dat = lib.create(_td("textDAT"), name)
+        dat.nodeX, dat.nodeY = 0, -150 * index
+        dat.text = _read(os.path.join(REPO, "src", "tdautobpm", name + ".py"))
 
     # -- extension ---------------------------------------------------------
     ext = comp.create(_td("textDAT"), "AutoBpmExt")
@@ -254,6 +294,21 @@ def build(parent_path="/", save_to=None):
 
     _append(page, "Str", "Status", "Status", "idle", readOnly=True)
 
+    # -- setup, for a component that arrived without an environment ---------
+    setup = comp.appendCustomPage("Setup")
+
+    # Blank means the shared per-user folder (envsetup.default_env_dir).
+    _append(setup, "Folder", "Envfolder", "Environment Folder", "")
+
+    # The wheel for this version, which carries the engine and the weights.
+    _append(setup, "Str", "Package", "Package", _package_url(_version()))
+
+    # Blank picks the best interpreter found; see envsetup.find_base_interpreters.
+    _append(setup, "Str", "Basepython", "Base Python", "")
+
+    setup.appendPulse("Setupenv", label="Create Environment")
+    setup.appendPulse("Cancelsetup", label="Cancel Setup")
+
     # -- network -----------------------------------------------------------
     in_chop = comp.create(_td("inCHOP"), "audio_in")
     in_chop.nodeX, in_chop.nodeY = -400, 0
@@ -287,6 +342,10 @@ def build(parent_path="/", save_to=None):
     frame_exec.text = FRAME_EXEC
     _set_par(frame_exec, ["framestart", "onframestart"], True)
 
+    log = comp.create(_td("textDAT"), "setup_log")
+    log.nodeX, log.nodeY = -700, -200
+    log.text = ""
+
     par_exec = comp.create(_td("parameterexecuteDAT"), "par_exec")
     par_exec.nodeX, par_exec.nodeY = 200, 200
     # "..", not ".": an OP parameter resolves relative to its own operator, so "."
@@ -294,7 +353,7 @@ def build(parent_path="/", save_to=None):
     _set_par(par_exec, ["op", "ops"], "..")
     _set_par(par_exec, ["pars", "parameters"],
              "Reset Tap Halftempo Doubletempo Restartdetector Synctempo "
-             "Runtime Envpath Torchdevice Repopath Presetsfile "
+             "Setupenv Cancelsetup Runtime Envpath Torchdevice Repopath Presetsfile "
              + " ".join(LIVE_SETTINGS))
     _set_par(par_exec, ["custom"], True, required=False)
     _set_par(par_exec, ["builtin"], False, required=False)
@@ -335,7 +394,9 @@ def _carry_over(comp):
     """
     values = {}
     for par in comp.customPars:
-        if par.isPulse or par.readOnly:
+        # Only what was actually changed: a parameter still at its old default should
+        # pick up the new one, or a version bump would keep the stale wheel URL.
+        if par.isPulse or par.readOnly or par.isDefault:
             continue
         values[par.name] = par.eval()
     sources = []
@@ -399,6 +460,8 @@ PALETTE = (
     ("tap", "TAP", 0.45, 0.76, 1.0),
     ("stopped", "STOPPED", 0.52, 0.53, 0.56),
     ("hold", "HOLD", 0.98, 0.86, 0.42),
+    ("noenv", "SET UP", 1.0, 0.55, 0.30),
+    ("setup", "SETTING UP", 0.45, 0.76, 1.0),
 )
 
 #: The range strip's scale, and the default range. Log-scaled, so an octave is
@@ -413,6 +476,9 @@ GREY = (0.55, 0.56, 0.59)
 DIM = (0.40, 0.41, 0.44)
 LIGHT = (0.86, 0.87, 0.89)
 INK = (0.07, 0.072, 0.078)  # the panel background, for text on the mode pill
+
+#: True while the component has no environment, or is building one.
+_SETTING_UP = "parent.AutoBpm.Mode.val in ('noenv', 'setup')"
 
 #: Expression fragments shared by the panel's parameters.
 _COMP = "parent.AutoBpm"
@@ -443,7 +509,13 @@ BUTTON_ROWS = (
         dict(name="btn_hold", label="HOLD", kind="toggledown", bound="Hold",
              weight=0.9),
         dict(name="btn_preset", weight=2.4,
-             label_expr="'PRESET: ' + %s.preset_name()" % _LOGIC),
+             label_expr="'PRESET: ' + %s.preset_name()" % _LOGIC,
+             hide_when=_SETTING_UP),
+        # Same place as the preset button, and only one of the two ever shows: with
+        # no environment there is nothing to detect, so that is the thing to offer.
+        dict(name="btn_setup", weight=2.4, show_when=_SETTING_UP,
+             label_expr="'CANCEL INSTALL' if %s.Mode.val == 'setup' "
+                        "else 'INSTALL PYTHON ENVIRONMENT'" % _COMP),
     )),
 )
 
@@ -476,9 +548,13 @@ def build_ui(comp):
     # updates the menu without touching TouchDesigner. Read as plain text and parsed
     # by read_presets, which is forgiving about what spreadsheet apps save.
     # Its path is set by the extension (AutoBpm.PointPresets), which knows where the
-    # checkout is even when Repo Path is blank.
+    # checkout is even when Repo Path is blank. Without a file, the panel falls back
+    # to the copy embedded below.
     presets = ui.create(_td("textDAT"), "presets_file")
     presets.nodeX, presets.nodeY = -800, 150
+    default = ui.create(_td("textDAT"), "presets_default")
+    default.nodeX, default.nodeY = -800, 250
+    default.text = _read(os.path.join(HERE, "presets.csv"))
     _set_par(presets, ["syncfile"], True, required=False)
     _set_par(presets, ["loadonstart"], True, required=False)
 
@@ -597,7 +673,7 @@ def build_ui(comp):
     ui_exec = ui.create(_td("parameterexecuteDAT"), "ui_exec")
     ui_exec.nodeX, ui_exec.nodeY = 150, -500
     _set_par(ui_exec, ["op", "ops"],
-             "btn_tap btn_reset btn_half btn_double btn_preset")
+             "btn_tap btn_reset btn_half btn_double btn_preset btn_setup")
     _set_par(ui_exec, ["pars", "parameters"], "value0")
     _set_par(ui_exec, ["custom"], True, required=False)
     _set_par(ui_exec, ["builtin"], True, required=False)
@@ -625,18 +701,29 @@ def build_ui(comp):
 def _build_buttons(ui):
     gap, margin = 8, 12
     for row_index, (y, height, buttons) in enumerate(BUTTON_ROWS):
-        weights = [spec.get("weight", 1.0) for spec in buttons]
-        unit = (UI_W - 2 * margin - gap * (len(buttons) - 1)) / sum(weights)
+        # A button sharing another's place (show_when/hide_when) sits on top of it
+        # rather than beside it, so it takes no room in the row.
+        stacked = [spec for spec in buttons if spec.get("show_when")]
+        laid_out = [spec for spec in buttons if not spec.get("show_when")]
+        weights = [spec.get("weight", 1.0) for spec in laid_out]
+        unit = (UI_W - 2 * margin - gap * (len(laid_out) - 1)) / sum(weights)
+        places = {}
         x = margin
+        for index, spec in enumerate(laid_out):
+            places[spec["name"]] = (x, unit * weights[index])
+            x += unit * weights[index] + gap
+        for spec in stacked:  # same rectangle as the button it replaces
+            places[spec["name"]] = (margin + (UI_W - 2 * margin - unit * spec["weight"]),
+                                    unit * spec["weight"])
+
         for index, spec in enumerate(buttons):
             name = spec["name"]
-            width = unit * weights[index]
+            x, width = places[name]
             button = ui.create(_td("buttonCOMP"), name)
             button.name = name  # TD 2025 appends a digit to new Button COMPs' names
             button.nodeX, button.nodeY = 150 + index * 150, -300 + row_index * 150
             for par_name, value in (("x", x), ("y", y), ("w", width), ("h", height)):
                 _set_par(button, [par_name], value)
-            x += width + gap
             _set_par(button, ["buttontype"], spec.get("kind", "momentary"))
             _set_par(button, ["fontsize"], 13, required=False)
 
@@ -656,6 +743,12 @@ def _build_buttons(ui):
                 button.par.label.expr = spec["label_expr"]
             else:
                 _set_par(button, ["label"], spec["label"])
+            display = getattr(button.par, "display", None)
+            if display is not None and spec.get("show_when"):
+                display.expr = spec["show_when"]
+            elif display is not None and spec.get("hide_when"):
+                display.expr = "not (%s)" % spec["hide_when"]
+
             if spec.get("bound"):
                 # Bound, so the parameter stays the single source of truth:
                 # flipping Active from anywhere else flips the button too.
@@ -866,9 +959,14 @@ _reported = None
 
 
 def presets():
-    """The presets from the presets file, or just Any if it has none."""
+    """The presets from the presets file, or the ones inside the component.
+
+    A .tox on its own has no presets.csv next to it, so the genre list travels with
+    the component and the file, when there is one, replaces it.
+    """
     dat = op('presets_file')
-    found, problems = comp().op('AutoBpmExt').module.read_presets(dat.text)
+    text = dat.text or op('presets_default').text
+    found, problems = comp().op('AutoBpmExt').module.read_presets(text)
     # Report each distinct set of problems once, not on every redraw.
     global _reported
     report = (dat.par.file.eval(), tuple(problems), bool(found))
@@ -971,6 +1069,11 @@ def onValueChange(par, prev):
         comp.Double()
     elif name == 'btn_preset':
         op('ui_logic').module.open_preset_menu()
+    elif name == 'btn_setup':
+        if comp.Mode.val == 'setup':
+            comp.CancelSetup()
+        else:
+            comp.SetupEnv()
     return
 '''
 
@@ -1049,6 +1152,10 @@ def onPulse(par):
         comp.Restart()
     elif par.name == 'Synctempo':
         comp.SyncTempo()
+    elif par.name == 'Setupenv':
+        comp.SetupEnv()
+    elif par.name == 'Cancelsetup':
+        comp.CancelSetup()
     return
 
 

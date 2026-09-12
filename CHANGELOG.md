@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.0 - 2026-09-12
+
+The .tox now sets itself up, so TouchDesigner users need no terminal, no checkout and
+no Python of their own.
+
+- **Install button**: with no environment, the panel offers to build one. It creates a
+  Python environment and installs this project's wheel (which carries the model) into
+  it, in the background, with progress in the status line and a transcript in the
+  `setup_log` DAT.
+- It builds on a Python 3.10-3.13 found on the machine, keeping the detector in its
+  own process; failing that on TouchDesigner's own Python, switching `Runtime` to
+  in-process, which macOS requires for such an environment.
+- Environments go in a shared per-user folder, so every project reuses one download.
+  New *Setup* page: Environment Folder, Package, Base Python, Create Environment and
+  Cancel Setup.
+- The component carries the TouchDesigner-side modules and the genre presets, so a
+  downloaded .tox works on its own. A checkout, when there is one, still wins.
+- Wheels are attached to releases from this version on.
+
 ## v0.1.1 - 2026-09-11
 
 Security hardening of the detector process. All of these need someone already able to

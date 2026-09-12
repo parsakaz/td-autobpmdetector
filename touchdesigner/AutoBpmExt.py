@@ -199,21 +199,77 @@ def find_repo(hint=None, owner=None):
     )
 
 
-def load_support(repo):
-    """Put `<repo>/src` on sys.path and return the stdlib-only helper modules.
+#: The stdlib-only modules the TouchDesigner side needs, in dependency order. They
+#: are embedded in the component as Text DATs, so a downloaded .tox works on its own.
+SUPPORT_MODULES = ("protocol", "client", "envresolve", "envsetup")
 
-    Deliberately not done at module scope: the repository location comes from a
-    parameter on the owning component, which does not exist until the extension is
-    constructed.
+#: Package name the embedded copies are registered under. Not `tdautobpm`, which
+#: belongs to a real installation, if there is one.
+EMBEDDED_PACKAGE = "tdautobpm_embedded"
+
+
+def load_support(repo=None, owner=None):
+    """Return the helper modules: ``(envresolve, SidecarClient, envsetup)``.
+
+    From `<repo>/src` when there is a checkout, so that editing the source and
+    rebuilding picks the changes up; otherwise from the copies inside the component.
+
+    Deliberately not done at module scope: where to load from depends on parameters
+    of the owning component, which do not exist until the extension is constructed.
     """
-    src = os.path.join(repo, "src")
-    if src not in sys.path:
-        sys.path.insert(0, src)
+    if repo:
+        src = os.path.join(repo, "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
 
-    from tdautobpm import envresolve
-    from tdautobpm.client import SidecarClient
+        from tdautobpm import envresolve, envsetup
+        from tdautobpm.client import SidecarClient
 
-    return envresolve, SidecarClient
+        return envresolve, SidecarClient, envsetup
+
+    return load_embedded(owner)
+
+
+def load_embedded(owner):
+    """Build the helper modules from the Text DATs inside the component.
+
+    Executed into a package of their own so that `client`'s ``from . import
+    protocol`` resolves to the embedded copy rather than anything installed.
+    """
+    import types
+
+    if owner is None:
+        raise RuntimeError("no component to load the embedded modules from")
+
+    package = sys.modules.get(EMBEDDED_PACKAGE)
+    if package is None:
+        package = types.ModuleType(EMBEDDED_PACKAGE)
+        package.__path__ = []  # a package with nothing on disk
+        sys.modules[EMBEDDED_PACKAGE] = package
+
+    for name in SUPPORT_MODULES:
+        full = EMBEDDED_PACKAGE + "." + name
+        if full in sys.modules:
+            continue
+        dat = owner.op("lib/" + name)
+        if dat is None:
+            raise RuntimeError(
+                "this component has no lib/%s; it predates the self-contained build. "
+                "Set Repo Path to a checkout, or import a newer .tox." % name
+            )
+        module = types.ModuleType(full)
+        module.__package__ = EMBEDDED_PACKAGE
+        sys.modules[full] = module
+        try:
+            exec(compile(dat.text, "<%s>" % dat.path, "exec"), module.__dict__)
+        except Exception:
+            del sys.modules[full]
+            raise
+        setattr(package, name, module)
+
+    return (sys.modules[EMBEDDED_PACKAGE + ".envresolve"],
+            sys.modules[EMBEDDED_PACKAGE + ".client"].SidecarClient,
+            sys.modules[EMBEDDED_PACKAGE + ".envsetup"])
 
 
 class AutoBpm:
@@ -228,6 +284,7 @@ class AutoBpm:
 
         self.repo = None
         self._E = None
+        self._S = None
         self._SidecarClient = None
         self._resolve_repo()
 
@@ -263,6 +320,11 @@ class AutoBpm:
         self.RawBpm = _dependency(0.0)
         self.holding = False
         self._trusted = False  # whether there is a confident tempo to hold
+
+        # Environment setup, for a component that arrived without one.
+        self.setup = None
+        self.needs_env = False
+        self.env_error = ""
 
     # -- parameters -------------------------------------------------------
 
@@ -304,8 +366,15 @@ class AutoBpm:
 
         try:
             self.env = self._E.resolve(spec, project_root=self.repo)
+            self.needs_env = False
         except self._E.EnvError as exc:
-            self._fail(str(exc))
+            # Nothing on this machine can run the detector yet. That is a job for
+            # SetupEnv, not an error to stare at, so the panel says so plainly and
+            # the detail goes where someone looking for it will find it.
+            self.needs_env = True
+            self.env_error = str(exc)
+            print("[AutoBpm] " + self.env_error)
+            self._fail("no Python environment yet - press Install in the panel")
             return
 
         try:
@@ -383,18 +452,25 @@ class AutoBpm:
             par.val = min(high, max(low, par.eval() * factor))
 
     def _resolve_repo(self):
-        """Find the checkout and load its helpers, then point the panel's presets."""
+        """Load the helper modules, from a checkout if there is one, and point the
+        panel's presets at the right file."""
         self.repo = None
         self._E = None
+        self._S = None
         self._SidecarClient = None
         try:
             self.repo = find_repo(self._par("Repopath", ""), owner=self.ownerComp)
-            self._E, self._SidecarClient = load_support(self.repo)
+        except RuntimeError:
+            pass  # no checkout: the component carries what this side needs
+        try:
+            self._E, self._SidecarClient, self._S = load_support(
+                self.repo, self.ownerComp)
         except Exception as exc:
             self.error = str(exc)
             self.status = "error"
             print("[AutoBpm] " + self.error)
         self.PointPresets()
+        self._check_env()
 
     @property
     def PresetsPath(self) -> str:
@@ -651,10 +727,15 @@ class AutoBpm:
             beat[0] = 1.0
         scriptOp["beat"].vals = beat
 
-        # Only touch the Status parameter when it actually changes. Writing a
-        # parameter on every cook makes the component's Parameter Execute DAT
-        # re-evaluate inside the same cook pass, which TouchDesigner reports as
-        # "Cook dependency loop detected".
+        self._publish_status()
+
+    def _publish_status(self):
+        """Show the current status and mode, without churning dependents.
+
+        Only on change: writing a parameter on every cook makes the component's
+        Parameter Execute DAT re-evaluate inside the same cook pass, which
+        TouchDesigner reports as "Cook dependency loop detected".
+        """
         text = self.error.splitlines()[0] if self.error else self.status
         if text != self._last_status:
             self._last_status = text
@@ -673,6 +754,10 @@ class AutoBpm:
         """What the panel should show: auto, hold, waiting, error, tap or stopped."""
         if not self._par("Active", True):
             return "tap" if self._source == "tap" and self.bpm > 0 else "stopped"
+        if self.setup is not None:
+            return "setup"
+        if self.needs_env:
+            return "noenv"
         if self.error or self.status == "error":
             return "error"
         if self.status.startswith("waiting"):
@@ -692,12 +777,123 @@ class AutoBpm:
         # cooks it without necessarily having pulled `audio_in` for this frame, which
         # can hand the callback an input with no channels yet. Cooking the output CHOP
         # pulls detect, which pulls audio_in, in the normal order.
+        self._poll_setup()
+
         target = self.ownerComp.op("bpm_out") or self.ownerComp.op("detect")
         if target is not None:
             source = self.ownerComp.op("audio_in")
             if source is not None:
                 source.cook(force=True)
             target.cook(force=True)
+
+    # -- environment setup -------------------------------------------------
+
+    @property
+    def EnvFolder(self) -> str:
+        """Where SetupEnv builds an environment."""
+        folder = (self._par("Envfolder", "") or "").strip()
+        if folder:
+            return os.path.abspath(os.path.expanduser(folder))
+        return self._S.default_env_dir() if self._S else ""
+
+    def _check_env(self):
+        """Note whether anything here can run the detector.
+
+        Done up front, so a component dropped into a project says "set up" straight
+        away rather than waiting for audio to be wired before finding out.
+        """
+        if self._E is None:
+            return
+        spec = (self._par("Envpath", "") or "").strip() or None
+        try:
+            self._E.resolve(spec, project_root=self.repo)
+            self.needs_env = False
+        except Exception:
+            self.needs_env = True
+            self.status = "no Python environment yet - press Install in the panel"
+
+    def SetupEnv(self):
+        """Build a Python environment for the detector and install it there.
+
+        Everything runs in the background: the download is hundreds of megabytes,
+        and TouchDesigner has frames to draw. Progress lands in Status, the whole
+        transcript in the setup_log DAT.
+        """
+        if self.setup is not None and not self.setup.done:
+            return
+        if self._S is None:
+            self._fail("the component's setup helper is missing; set Repo Path")
+            return
+
+        package = (self._par("Package", "") or "").strip()
+        if not package:
+            self._fail("no package to install: fill in the Package parameter")
+            return
+
+        chosen = (self._par("Basepython", "") or "").strip()
+        if chosen:
+            found = [(chosen, "", False)]
+        else:
+            found = self._S.find_base_interpreters()
+        if not found:
+            self._fail(
+                "no Python to build an environment on. Install Python 3.11 or 3.12 "
+                "from python.org, or point Base Python at one."
+            )
+            return
+
+        base, version, is_host = found[0]
+        folder = self.EnvFolder
+        self._log("[setup] " + self._S.describe_plan(folder, base, version, is_host))
+        self.Stop()
+        self.setup = _Setup(self._S.create_steps(folder, base, package),
+                            on_line=self._log)
+        self.setup.is_host = is_host
+        self.setup.env_dir = folder
+        self.setup.start()
+        self.status = "setting up: " + self.setup.label
+
+    def CancelSetup(self):
+        if self.setup is not None:
+            self.setup.cancel()
+
+    def _poll_setup(self):
+        """Follow a running setup; called every frame from Tick."""
+        setup = self.setup
+        if setup is None:
+            return
+        setup.poll()
+        if not setup.done:
+            self.status = "setting up: %s %s" % (setup.label, setup.progress)
+            self._publish_status()
+            return
+
+        self.setup = None
+        if setup.failed:
+            self.needs_env = True
+            self._fail("setup failed: " + (setup.error or "see the setup_log DAT"))
+            return
+
+        # Point the component at what was just built. An environment on
+        # TouchDesigner's own Python can only be used from inside TouchDesigner, so
+        # it has to run in-process.
+        par = getattr(self.ownerComp.par, "Envpath", None)
+        if par is not None:
+            par.val = setup.env_dir
+        if setup.is_host:
+            runtime = getattr(self.ownerComp.par, "Runtime", None)
+            if runtime is not None:
+                runtime.val = "inprocess"
+        self._log("[setup] done: " + setup.env_dir)
+        self.needs_env = False
+        self.Restart()
+
+    def _log(self, line):
+        """Append to the setup transcript, and echo it to the textport."""
+        print("[AutoBpm] " + line)
+        dat = self.ownerComp.op("setup_log")
+        if dat is not None:
+            dat.text = (dat.text + line + "\n")[-20000:]
 
     def Diagnose(self):
         """Print what the component can see. Call from the textport:
@@ -721,6 +917,8 @@ class AutoBpm:
         print("[AutoBpm] repo:       %s" % self.repo)
         print("[AutoBpm] status:     %s" % self.status)
         print("[AutoBpm] error:      %s" % (self.error or "(none)"))
+        if self.needs_env:
+            print("[AutoBpm] environment: %s" % (self.env_error or "none found"))
         print("[AutoBpm] runtime:    %s" % self._par("Runtime", "?"))
         print("[AutoBpm] env par:    %r" % (self._par("Envpath", ""),))
         if self.env is not None:
@@ -828,6 +1026,107 @@ def set_project_tempo(bpm: float) -> bool:
 # ---------------------------------------------------------------------------
 # detector adapters
 # ---------------------------------------------------------------------------
+
+
+class _Setup:
+    """Runs the setup commands one after another, off the cook thread.
+
+    TouchDesigner must keep drawing while pip downloads torch, so each command runs
+    as a child process with a thread draining its output. `poll` is called every
+    frame and never blocks.
+    """
+
+    def __init__(self, steps, on_line=None):
+        self.steps = list(steps)
+        self.on_line = on_line or (lambda line: None)
+        self.index = 0
+        self.proc = None
+        self.thread = None
+        self.done = False
+        self.failed = False
+        self.error = ""
+        self.progress = ""
+        self.last_line = ""
+        self.env_dir = ""
+        self.is_host = False
+        self._started = 0.0
+        self._cancelled = False
+
+    @property
+    def label(self) -> str:
+        if self.index < len(self.steps):
+            return self.steps[self.index][0]
+        return "finishing"
+
+    def start(self):
+        self._spawn()
+
+    def _spawn(self):
+        import subprocess
+        import threading
+
+        label, argv = self.steps[self.index]
+        self.on_line("[setup] " + label)
+        self.on_line("[setup] $ " + " ".join(argv))
+        self.progress = ""
+        self._started = time.time()
+        try:
+            self.proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+        except OSError as exc:
+            self._fail("could not run %s: %s" % (argv[0], exc))
+            return
+
+        def drain(stream):
+            for line in stream:
+                line = line.rstrip()
+                if line:
+                    self.last_line = line
+                    self.on_line(line)
+
+        self.thread = threading.Thread(
+            target=drain, args=(self.proc.stdout,), daemon=True)
+        self.thread.start()
+
+    def poll(self):
+        """Move the run along. Returns once there is nothing to do this frame."""
+        if self.done or self.proc is None:
+            return
+        code = self.proc.poll()
+        if code is None:
+            # Downloading torch takes minutes and pip says little while it does, so
+            # show the clock as well as whatever it last said.
+            elapsed = int(time.time() - self._started)
+            self.progress = ("%ds  %s" % (elapsed, self.last_line[-40:])
+                             if self.last_line else "%ds" % elapsed)
+            return
+        if self._cancelled:
+            self._fail("cancelled")
+            return
+        if code != 0:
+            self._fail("%s exited with code %d" % (self.steps[self.index][0], code))
+            return
+
+        self.index += 1
+        if self.index >= len(self.steps):
+            self.done = True
+            return
+        self._spawn()
+
+    def cancel(self):
+        self._cancelled = True
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+        else:
+            self._fail("cancelled")
+
+    def _fail(self, message):
+        self.error = message
+        self.failed = True
+        self.done = True
+        self.on_line("[setup] " + message)
 
 
 class _SidecarDetector:

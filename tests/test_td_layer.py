@@ -101,9 +101,10 @@ class TestExtensionModule:
         assert "TDAUTOBPM_REPO" in message
 
     def test_load_support_returns_stdlib_only_helpers(self, ext):
-        envresolve, client_cls = ext["load_support"](REPO)
+        envresolve, client_cls, envsetup = ext["load_support"](REPO)
         assert envresolve.__name__ == "tdautobpm.envresolve"
         assert client_cls.__name__ == "SidecarClient"
+        assert envsetup.__name__ == "tdautobpm.envsetup"
 
     @pytest.mark.parametrize("filename", ["AutoBpmExt.py", "build_component.py"])
     def test_files_are_ascii(self, filename):
@@ -111,6 +112,63 @@ class TestExtensionModule:
         `exec(open(p).read())` fails on the first non-ASCII character."""
         with open(os.path.join(TD_DIR, filename), "rb") as f:
             f.read().decode("ascii")
+
+
+class _Dat:
+    """A Text DAT holding one of the embedded modules."""
+
+    def __init__(self, name):
+        self.path = "/AutoBpm/lib/" + name
+        with open(os.path.join(REPO, "src", "tdautobpm", name + ".py")) as f:
+            self.text = f.read()
+
+
+class _Owner:
+    """A component carrying the embedded modules, and nothing else."""
+
+    def __init__(self, missing=()):
+        self.missing = set(missing)
+
+    def op(self, path):
+        name = path.rsplit("/", 1)[-1]
+        return None if name in self.missing else _Dat(name)
+
+
+@pytest.fixture
+def unloaded():
+    """Forget the embedded package between tests; it lives in sys.modules."""
+    def clear():
+        for name in [m for m in sys.modules if m.split(".")[0] == "tdautobpm_embedded"]:
+            del sys.modules[name]
+    clear()
+    yield
+    clear()
+
+
+class TestEmbeddedModules:
+    """A downloaded .tox has no checkout, so it carries these itself."""
+
+    def test_loads_the_modules_out_of_the_component(self, ext, unloaded):
+        envresolve, client_cls, envsetup = ext["load_support"](None, _Owner())
+        assert client_cls.__name__ == "SidecarClient"
+        assert envsetup.default_env_dir()
+        assert envresolve.expand("~") == os.path.expanduser("~")
+
+    def test_the_client_uses_the_embedded_protocol(self, ext, unloaded):
+        """`from . import protocol` must not reach for an installed copy."""
+        _, client_cls, _ = ext["load_support"](None, _Owner())
+        client_module = sys.modules[client_cls.__module__]
+        assert client_module.P is sys.modules["tdautobpm_embedded.protocol"]
+
+    def test_an_older_component_says_what_is_missing(self, ext, unloaded):
+        with pytest.raises(RuntimeError) as excinfo:
+            ext["load_support"](None, _Owner(missing={"envsetup"}))
+        assert "lib/envsetup" in str(excinfo.value)
+        assert "Repo Path" in str(excinfo.value)
+
+    def test_a_checkout_is_preferred_when_there_is_one(self, ext, unloaded):
+        envresolve, _, _ = ext["load_support"](REPO, _Owner())
+        assert envresolve.__name__ == "tdautobpm.envresolve"
 
 
 class _Par:
