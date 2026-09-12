@@ -472,3 +472,42 @@ class TestHold:
         comp.par.Active = True  # START
         bpm._take_estimate(90.0, 0.2)
         assert bpm.bpm == pytest.approx(120.0)
+
+
+class TestSetupRunner:
+    """TouchDesigner objects may only be touched from the main thread, so the
+    runner's output has to reach the caller there and nowhere else."""
+
+    def _run(self, ext, script):
+        import threading
+        import time
+
+        seen = []
+        setup = ext["_Setup"](
+            [("step", [sys.executable, "-c", script])],
+            on_line=lambda line: seen.append((threading.current_thread(), line)),
+        )
+        setup.start()
+        deadline = time.time() + 30
+        while not setup.done and time.time() < deadline:
+            setup.poll()
+            time.sleep(0.01)
+        setup.poll()
+        return setup, seen
+
+    def test_output_reaches_the_caller_only_on_the_polling_thread(self, ext):
+        import threading
+
+        setup, seen = self._run(
+            ext, "import sys\nfor i in range(20): print('line', i)\n")
+        assert setup.done and not setup.failed
+        assert seen, "no output was reported"
+        assert {thread for thread, _ in seen} == {threading.current_thread()}
+        assert seen[-1][1].endswith("line 19")
+
+    def test_a_failing_command_reports_its_output_and_fails(self, ext):
+        setup, seen = self._run(
+            ext, "import sys\nprint('nearly')\nsys.exit(3)\n")
+        assert setup.failed
+        assert "code 3" in setup.error
+        assert any("nearly" in line for _, line in seen)

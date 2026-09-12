@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.1 - 2026-09-12
+
+- Fix a thread conflict when creating an environment: the thread reading the
+  installer's output wrote to the log DAT and the textport directly, and
+  TouchDesigner objects may only be touched from the main thread. It now collects
+  lines for the main thread to report, which also stops the stray thread tracebacks
+  that appeared against whichever DAT had last cooked.
+
 ## v0.2.0 - 2026-09-12
 
 The .tox now sets itself up, so TouchDesigner users need no terminal, no checkout and

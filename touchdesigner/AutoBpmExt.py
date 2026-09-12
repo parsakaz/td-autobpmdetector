@@ -1034,11 +1034,17 @@ class _Setup:
     TouchDesigner must keep drawing while pip downloads torch, so each command runs
     as a child process with a thread draining its output. `poll` is called every
     frame and never blocks.
+
+    The reading thread only collects lines. TouchDesigner objects may be touched from
+    the main thread alone, so whatever the caller does with them - writing the log
+    DAT, printing to the textport - happens in `poll`.
     """
 
     def __init__(self, steps, on_line=None):
         self.steps = list(steps)
         self.on_line = on_line or (lambda line: None)
+        self._pending = []
+        self._lock = threading.Lock()
         self.index = 0
         self.proc = None
         self.thread = None
@@ -1083,17 +1089,26 @@ class _Setup:
             for line in stream:
                 line = line.rstrip()
                 if line:
-                    self.last_line = line
-                    self.on_line(line)
+                    with self._lock:
+                        self._pending.append(line)
 
         self.thread = threading.Thread(
             target=drain, args=(self.proc.stdout,), daemon=True)
         self.thread.start()
 
+    def _flush(self):
+        """Hand the reader's lines to the caller, on the calling (main) thread."""
+        with self._lock:
+            lines, self._pending = self._pending, []
+        for line in lines:
+            self.last_line = line
+            self.on_line(line)
+
     def poll(self):
         """Move the run along. Returns once there is nothing to do this frame."""
         if self.done or self.proc is None:
             return
+        self._flush()
         code = self.proc.poll()
         if code is None:
             # Downloading torch takes minutes and pip says little while it does, so
@@ -1123,6 +1138,7 @@ class _Setup:
             self._fail("cancelled")
 
     def _fail(self, message):
+        self._flush()
         self.error = message
         self.failed = True
         self.done = True
